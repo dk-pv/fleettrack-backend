@@ -3,7 +3,13 @@ import {
   Controller,
   Get,
   Post,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
+
+import type{ Request } from 'express';
+
+import { JwtAuthGuard } from './jwt-auth.guard';
 
 import { AuthService } from './auth.service';
 
@@ -13,16 +19,14 @@ export class AuthController {
     private readonly authService: AuthService,
   ) {}
 
-  @Get()
-  test() {
-    return {
-      success: true,
-      message: 'Auth API Working',
-    };
-  }
-
   @Post('login')
   login(@Body() body: any) {
     return this.authService.login(body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  me(@Req() req: Request) {
+    return req.user;
   }
 }

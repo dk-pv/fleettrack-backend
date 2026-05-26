@@ -3,12 +3,17 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 
+import * as bcrypt from 'bcrypt';
+
+import { JwtService } from '@nestjs/jwt';
+
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AuthService {
   constructor(
     private prisma: PrismaService,
+    private jwtService: JwtService,
   ) {}
 
   async login(body: any) {
@@ -27,17 +32,28 @@ export class AuthService {
       );
     }
 
-    if (user.password !== password) {
+    const isPasswordValid =
+  password === user.password;
+
+    if (!isPasswordValid) {
       throw new UnauthorizedException(
         'Invalid password',
       );
     }
 
+    const token =
+      this.jwtService.sign({
+        userId: user.id,
+        role: user.role,
+      });
+
+    const { password: _, ...safeUser } =
+      user;
+
     return {
       success: true,
-      message: 'Login successful',
-      user,
-      token: 'dummy-jwt-token',
+      token,
+      user: safeUser,
     };
   }
 }
