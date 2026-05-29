@@ -1,10 +1,15 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
   Param,
+  Patch,
+  Post,
   UseGuards,
 } from '@nestjs/common';
+
+import { VehiclesService } from './vehicles.service';
 
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
@@ -14,6 +19,25 @@ import { Roles } from '../auth/roles.decorator';
 
 @Controller('vehicles')
 export class VehiclesController {
+  constructor(
+    private readonly vehiclesService: VehiclesService,
+  ) {}
+
+  @UseGuards(
+    JwtAuthGuard,
+    RolesGuard,
+  )
+  @Roles(
+    'ADMIN',
+    'FLEET_MANAGER',
+  )
+  @Post()
+  create(@Body() body: any) {
+    return this.vehiclesService.create(
+      body,
+    );
+  }
+
   @UseGuards(
     JwtAuthGuard,
     RolesGuard,
@@ -25,11 +49,44 @@ export class VehiclesController {
   )
   @Get()
   findAll() {
-    return {
-      success: true,
-      message:
-        'Vehicles list access granted',
-    };
+    return this.vehiclesService.findAll();
+  }
+
+  @UseGuards(
+    JwtAuthGuard,
+    RolesGuard,
+  )
+  @Roles(
+    'ADMIN',
+    'FLEET_MANAGER',
+    'VIEWER',
+  )
+  @Get(':id')
+  findOne(
+    @Param('id') id: string,
+  ) {
+    return this.vehiclesService.findOne(
+      id,
+    );
+  }
+
+  @UseGuards(
+    JwtAuthGuard,
+    RolesGuard,
+  )
+  @Roles(
+    'ADMIN',
+    'FLEET_MANAGER',
+  )
+  @Patch(':id')
+  update(
+    @Param('id') id: string,
+    @Body() body: any,
+  ) {
+    return this.vehiclesService.update(
+      id,
+      body,
+    );
   }
 
   @UseGuards(
@@ -38,12 +95,11 @@ export class VehiclesController {
   )
   @Roles('ADMIN')
   @Delete(':id')
-  deleteVehicle(
+  remove(
     @Param('id') id: string,
   ) {
-    return {
-      success: true,
-      message: `Vehicle ${id} deleted`,
-    };
+    return this.vehiclesService.remove(
+      id,
+    );
   }
 }

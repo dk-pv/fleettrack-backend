@@ -21,3 +21,33 @@ enum Role {
   FLEET_MANAGER
   VIEWER
 }
+
+model Vehicle {
+  id             String          @id @default(cuid())
+
+  vehicleName    String
+
+  vehicleNumber  String          @unique
+
+  gpsDeviceId    String
+
+  driverName     String
+
+  clientName     String
+
+  status         VehicleStatus   @default(IDLE)
+
+  latitude       Float           @default(0)
+
+  longitude      Float           @default(0)
+
+  speed          Float           @default(0)
+
+  createdAt      DateTime        @default(now())
+}
+
+enum VehicleStatus {
+  MOVING
+  IDLE
+  OFFLINE
+}
