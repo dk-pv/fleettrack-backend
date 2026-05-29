@@ -59,7 +59,12 @@ export class VehiclesController {
     return this.vehiclesService.remove(id);
   }
 
- 
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN', 'FLEET_MANAGER')
+  @Patch(':id/location')
+  updateLocation(@Param('id') id: string, @Body() body: any) {
+    return this.vehiclesService.updateLocation(id, body);
+  }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'FLEET_MANAGER', 'VIEWER')

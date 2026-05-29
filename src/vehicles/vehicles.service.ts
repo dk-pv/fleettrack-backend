@@ -5,10 +5,14 @@ import {
 } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
+import { TrackingGateway } from '../tracking/tracking.gateway';
 
 @Injectable()
 export class VehiclesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private trackingGateway: TrackingGateway,
+  ) {}
 
   async create(body: any) {
     const {
@@ -146,6 +150,42 @@ export class VehiclesService {
     return {
       success: true,
       message: 'Vehicle deleted successfully',
+    };
+  }
+
+  async updateLocation(id: string, body: any) {
+    const existingVehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        id,
+      },
+    });
+
+    if (!existingVehicle) {
+      throw new NotFoundException('Vehicle not found');
+    }
+
+    const updatedVehicle = await this.prisma.vehicle.update({
+      where: {
+        id,
+      },
+
+      data: {
+        latitude: body.latitude,
+
+        longitude: body.longitude,
+
+        speed: body.speed,
+
+        status: body.status,
+      },
+    });
+
+    this.trackingGateway.server.emit('vehicleLocationUpdate', updatedVehicle);
+
+    return {
+      success: true,
+
+      vehicle: updatedVehicle,
     };
   }
 
