@@ -3,14 +3,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-
+import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class VehiclesService {
-  constructor(
-    private prisma: PrismaService,
-  ) {}
+  constructor(private prisma: PrismaService) {}
 
   async create(body: any) {
     const {
@@ -25,33 +23,29 @@ export class VehiclesService {
       speed,
     } = body;
 
-    const existingVehicle =
-      await this.prisma.vehicle.findUnique({
-        where: {
-          vehicleNumber,
-        },
-      });
+    const existingVehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        vehicleNumber,
+      },
+    });
 
     if (existingVehicle) {
-      throw new BadRequestException(
-        'Vehicle number already exists',
-      );
+      throw new BadRequestException('Vehicle number already exists');
     }
 
-    const vehicle =
-      await this.prisma.vehicle.create({
-        data: {
-          vehicleName,
-          vehicleNumber,
-          gpsDeviceId,
-          driverName,
-          clientName,
-          status,
-          latitude,
-          longitude,
-          speed,
-        },
-      });
+    const vehicle = await this.prisma.vehicle.create({
+      data: {
+        vehicleName,
+        vehicleNumber,
+        gpsDeviceId,
+        driverName,
+        clientName,
+        status,
+        latitude,
+        longitude,
+        speed,
+      },
+    });
 
     return {
       success: true,
@@ -60,12 +54,11 @@ export class VehiclesService {
   }
 
   async findAll() {
-    const vehicles =
-      await this.prisma.vehicle.findMany({
-        orderBy: {
-          createdAt: 'desc',
-        },
-      });
+    const vehicles = await this.prisma.vehicle.findMany({
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
 
     return {
       success: true,
@@ -74,17 +67,14 @@ export class VehiclesService {
   }
 
   async findOne(id: string) {
-    const vehicle =
-      await this.prisma.vehicle.findUnique({
-        where: {
-          id,
-        },
-      });
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        id,
+      },
+    });
 
     if (!vehicle) {
-      throw new NotFoundException(
-        'Vehicle not found',
-      );
+      throw new NotFoundException('Vehicle not found');
     }
 
     return {
@@ -93,56 +83,42 @@ export class VehiclesService {
     };
   }
 
-  async update(
-    id: string,
-    body: any,
-  ) {
-    const existingVehicle =
-      await this.prisma.vehicle.findUnique({
-        where: {
-          id,
-        },
-      });
+  async update(id: string, body: any) {
+    const existingVehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        id,
+      },
+    });
 
     if (!existingVehicle) {
-      throw new NotFoundException(
-        'Vehicle not found',
-      );
+      throw new NotFoundException('Vehicle not found');
     }
 
-    const updatedVehicle =
-      await this.prisma.vehicle.update({
-        where: {
-          id,
-        },
+    const updatedVehicle = await this.prisma.vehicle.update({
+      where: {
+        id,
+      },
 
-        data: {
-          vehicleName:
-            body.vehicleName,
+      data: {
+        vehicleName: body.vehicleName,
 
-          vehicleNumber:
-            body.vehicleNumber,
+        vehicleNumber: body.vehicleNumber,
 
-          gpsDeviceId:
-            body.gpsDeviceId,
+        gpsDeviceId: body.gpsDeviceId,
 
-          driverName:
-            body.driverName,
+        driverName: body.driverName,
 
-          clientName:
-            body.clientName,
+        clientName: body.clientName,
 
-          status: body.status,
+        status: body.status,
 
-          latitude:
-            body.latitude,
+        latitude: body.latitude,
 
-          longitude:
-            body.longitude,
+        longitude: body.longitude,
 
-          speed: body.speed,
-        },
-      });
+        speed: body.speed,
+      },
+    });
 
     return {
       success: true,
@@ -151,17 +127,14 @@ export class VehiclesService {
   }
 
   async remove(id: string) {
-    const existingVehicle =
-      await this.prisma.vehicle.findUnique({
-        where: {
-          id,
-        },
-      });
+    const existingVehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        id,
+      },
+    });
 
     if (!existingVehicle) {
-      throw new NotFoundException(
-        'Vehicle not found',
-      );
+      throw new NotFoundException('Vehicle not found');
     }
 
     await this.prisma.vehicle.delete({
@@ -172,8 +145,83 @@ export class VehiclesService {
 
     return {
       success: true,
-      message:
-        'Vehicle deleted successfully',
+      message: 'Vehicle deleted successfully',
     };
+  }
+
+  async generateVehicleReport(id: string) {
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        id,
+      },
+    });
+
+    if (!vehicle) {
+      throw new NotFoundException('Vehicle not found');
+    }
+
+    const doc = new PDFDocument({
+      margin: 50,
+    });
+
+    const buffers: Uint8Array[] = [];
+
+    doc.on('data', (chunk) => {
+      buffers.push(chunk);
+    });
+
+    return new Promise<Buffer>((resolve) => {
+      doc.on('end', () => {
+        resolve(Buffer.concat(buffers));
+      });
+
+      // Title
+      doc.fontSize(24).text('Fleet Vehicle Report', {
+        align: 'center',
+      });
+
+      doc.moveDown(2);
+
+      // Vehicle Details
+      doc.fontSize(16).text(`Vehicle Name: ${vehicle.vehicleName}`);
+
+      doc.moveDown();
+
+      doc.text(`Vehicle Number: ${vehicle.vehicleNumber}`);
+
+      doc.moveDown();
+
+      doc.text(`Driver Name: ${vehicle.driverName}`);
+
+      doc.moveDown();
+
+      doc.text(`Client Name: ${vehicle.clientName}`);
+
+      doc.moveDown();
+
+      doc.text(`GPS Device ID: ${vehicle.gpsDeviceId}`);
+
+      doc.moveDown();
+
+      doc.text(`Status: ${vehicle.status}`);
+
+      doc.moveDown();
+
+      doc.text(`Latitude: ${vehicle.latitude}`);
+
+      doc.moveDown();
+
+      doc.text(`Longitude: ${vehicle.longitude}`);
+
+      doc.moveDown();
+
+      doc.text(`Speed: ${vehicle.speed} km/h`);
+
+      doc.moveDown();
+
+      doc.text(`Generated At: ${new Date().toLocaleString()}`);
+
+      doc.end();
+    });
   }
 }
