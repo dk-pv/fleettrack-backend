@@ -46,6 +46,13 @@ export class VehiclesController {
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN', 'FLEET_MANAGER', 'VIEWER')
+  @Get(':id/history')
+  getVehicleHistory(@Param('id') id: string) {
+    return this.vehiclesService.getVehicleHistory(id);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'FLEET_MANAGER')
   @Patch(':id')
   update(@Param('id') id: string, @Body() body: any) {

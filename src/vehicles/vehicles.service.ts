@@ -87,6 +87,40 @@ export class VehiclesService {
     };
   }
 
+  async getVehicleHistory(id: string) {
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: {
+        id,
+      },
+    });
+
+    if (!vehicle) {
+      throw new NotFoundException('Vehicle not found');
+    }
+
+    const history = await this.prisma.vehicleLocationHistory.findMany({
+      where: {
+        vehicleId: id,
+      },
+
+      orderBy: {
+        createdAt: 'asc',
+      },
+
+      take: 500,
+    });
+
+    return {
+      success: true,
+
+      vehicleId: id,
+
+      total: history.length,
+
+      history,
+    };
+  }
+
   async update(id: string, body: any) {
     const existingVehicle = await this.prisma.vehicle.findUnique({
       where: {
