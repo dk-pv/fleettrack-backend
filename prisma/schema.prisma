@@ -21,26 +21,57 @@ enum Role {
   FLEET_MANAGER
   VIEWER
 }
+
+
+
 model Vehicle {
-  id             String         @id @default(cuid())
+  id                 String         @id @default(cuid())
 
-  vehicleName    String
-  vehicleNumber  String         @unique
-  gpsDeviceId    String
+  vehicleName        String
 
-  driverName     String
-  clientName     String
+  vehicleNumber      String         @unique
 
-  status         VehicleStatus  @default(IDLE)
+  gpsDeviceId        String
 
-  latitude       Float          @default(0)
-  longitude      Float          @default(0)
+  providerName       String?
 
-  speed          Float          @default(0)
+  providerVehicleId  String?
 
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  driverName         String
+
+  clientName         String
+
+  ignition           Boolean        @default(false)
+
+  batteryVoltage     Float?         @default(0)
+
+  charge             Boolean        @default(false)
+
+  isOnline           Boolean        @default(true)
+
+  status             VehicleStatus  @default(IDLE)
+
+  latitude           Float          @default(0)
+
+  longitude          Float          @default(0)
+
+  speed              Float          @default(0)
+
+  lastSeenAt         DateTime?
+
+  lastProviderUpdate DateTime?
+
+  createdAt          DateTime       @default(now())
+
+  updatedAt          DateTime       @updatedAt
+
+  @@index([vehicleNumber])
+
+  @@index([status])
+
+  @@index([lastProviderUpdate])
 }
+
 enum VehicleStatus {
   MOVING
   IDLE
