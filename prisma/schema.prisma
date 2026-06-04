@@ -61,19 +61,48 @@ model Vehicle {
 
   lastProviderUpdate DateTime?
 
-  createdAt          DateTime       @default(now())
+  createdAt          DateTime @default(now())
 
-  updatedAt          DateTime       @updatedAt
+  updatedAt          DateTime @updatedAt
 
-  @@index([vehicleNumber])
+  locationHistory    VehicleLocationHistory[]
 
-  @@index([status])
 
-  @@index([lastProviderUpdate])
+    @@index([vehicleNumber])
+
+    @@index([status])
+
+    @@index([lastProviderUpdate])
+
 }
 
 enum VehicleStatus {
   MOVING
   IDLE
   OFFLINE
+}
+
+
+
+
+model VehicleLocationHistory {
+  id        String   @id @default(cuid())
+
+  vehicleId String
+
+  latitude  Float
+
+  longitude Float
+
+  speed     Float
+
+  ignition  Boolean
+
+  createdAt DateTime @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+
+  @@index([createdAt])
 }
