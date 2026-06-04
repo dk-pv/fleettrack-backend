@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrackingGateway } from './tracking.gateway';
+import fetch from 'node-fetch';
 
 @Injectable()
 export class TrackingService {
@@ -32,7 +33,7 @@ export class TrackingService {
         );
       }
 
-      const data = await response.json();
+     const data = (await response.json()) as any[];
 
       for (const item of data) {
         const vehicleNumber =
