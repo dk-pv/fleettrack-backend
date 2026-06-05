@@ -47,6 +47,7 @@ export class TrackingService {
             where: {
               vehicleNumber,
             },
+            
           });
 
 
