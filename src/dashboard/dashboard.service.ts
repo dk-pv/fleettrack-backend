@@ -1,111 +1,79 @@
-
 import { Injectable } from '@nestjs/common';
-
 import { PrismaService } from '../prisma/prisma.service';
-
+import { getVehicleStatus } from '../common/utils/vehicle-status';
 @Injectable()
 export class DashboardService {
-  constructor(
-    private prisma: PrismaService,
-  ) {}
+  constructor(private prisma: PrismaService) {}
 
-  async getDashboardData() {
-    /* ----------------------------- */
-    /* VEHICLE COUNTS */
-    /* ----------------------------- */
+  /* -------------------------------- */
+  /* DASHBOARD STATS */
+  /* -------------------------------- */
 
-    const totalVehicles =
-      await this.prisma.vehicle.count();
+  async getDashboardStats() {
+    const vehicles = await this.prisma.vehicle.findMany();
 
-    const activeVehicles =
-      await this.prisma.vehicle.count({
-        where: {
-          status: 'MOVING',
-        },
-      });
+    let totalVehicles = vehicles.length;
 
-    const offlineVehicles =
-      await this.prisma.vehicle.count({
-        where: {
-          status: 'OFFLINE',
-        },
-      });
+    let activeVehicles = 0;
 
-    /* ----------------------------- */
-    /* WEEKLY ACTIVITY */
-    /* ----------------------------- */
+    let offlineVehicles = 0;
 
-    const weeklyActivity = [
-      {
-        day: 'Mon',
-        value: 40,
-      },
-      {
-        day: 'Tue',
-        value: 55,
-      },
-      {
-        day: 'Wed',
-        value: 48,
-      },
-      {
-        day: 'Thu',
-        value: 70,
-      },
-      {
-        day: 'Fri',
-        value: 62,
-      },
-      {
-        day: 'Sat',
-        value: 30,
-      },
-      {
-        day: 'Sun',
-        value: 18,
-      },
-    ];
+    vehicles.forEach((vehicle) => {
+      const status = getVehicleStatus(vehicle.ignition, vehicle.speed);
 
-    /* ----------------------------- */
-    /* ACTIVE VEHICLES */
-    /* ----------------------------- */
+      if (status === 'MOVING' || status === 'IDLE') {
+        activeVehicles++;
+      }
 
-    const recentVehicles =
-      await this.prisma.vehicle.findMany({
-        take: 5,
-
-        orderBy: {
-          updatedAt: 'desc',
-        },
-
-        select: {
-          id: true,
-
-          vehicleNumber: true,
-
-          driverName: true,
-
-          speed: true,
-
-          status: true,
-        },
-      });
+      if (status === 'OFFLINE') {
+        offlineVehicles++;
+      }
+    });
 
     return {
       success: true,
 
-      stats: {
+      data: {
         totalVehicles,
-
         activeVehicles,
-
         offlineVehicles,
       },
-
-      weeklyActivity,
-
-      activeVehiclesList:
-        recentVehicles,
     };
   }
+
+  /* -------------------------------- */
+  async getActiveVehicles() {
+    const vehicles = await this.prisma.vehicle.findMany({
+      orderBy: {
+        updatedAt: 'desc',
+      },
+
+      take: 5,
+    });
+
+    const activeVehicles = vehicles
+      .map((vehicle) => {
+        const status = getVehicleStatus(vehicle.ignition, vehicle.speed);
+
+        return {
+          id: vehicle.id,
+
+          vehicleNumber: vehicle.vehicleNumber,
+
+          driverName: vehicle.driverName,
+
+          speed: vehicle.speed,
+
+          status,
+        };
+      })
+
+      .filter((vehicle) => vehicle.status !== 'OFFLINE');
+
+    return {
+      success: true,
+
+      data: activeVehicles,
+    };
+  } 
 }
