@@ -1,14 +1,12 @@
-
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrackingGateway } from './tracking.gateway';
+import { VehicleStatus } from '@prisma/client';
 
 @Injectable()
 export class TrackingService {
-  private readonly logger = new Logger(
-    TrackingService.name,
-  );
+  private readonly logger = new Logger(TrackingService.name);
 
   constructor(
     private prisma: PrismaService,
@@ -18,98 +16,71 @@ export class TrackingService {
   @Cron('*/20 * * * * *')
   async syncVehicles() {
     try {
-      this.logger.log(
-        'Syncing vehicles from AiroTrack...',
-      );
+      this.logger.log('Syncing vehicles from AiroTrack...');
 
-      const response = await fetch(
-        process.env.AIROTRACK_API!,
-      );
+      const response = await fetch(process.env.AIROTRACK_API!);
 
       if (!response.ok) {
-        throw new Error(
-          `AiroTrack API failed: ${response.status}`,
-        );
+        throw new Error(`AiroTrack API failed: ${response.status}`);
       }
-
-     const data = (await response.json()) as any[];
-
+      const data = (await response.json()) as any[];
       for (const item of data) {
-        const vehicleNumber =
-          item.vehicleNumber;
+        const vehicleNumber = item.vehicleNumber;
 
-        const status = item.ignition
-          ? 'MOVING'
-          : 'IDLE';
+        let status: VehicleStatus = 'OFFLINE';
 
-        let vehicle =
-          await this.prisma.vehicle.findUnique({
-            where: {
-              vehicleNumber,
-            },
-            
-          });
+        if (item.ignition && item.speed > 0) {
+          status = 'MOVING';
+        } else if (item.ignition && item.speed <= 0) {
+          status = 'IDLE';
+        }
 
+        let vehicle = await this.prisma.vehicle.findUnique({
+          where: {
+            vehicleNumber,
+          },
+        });
 
         if (!vehicle) {
-          vehicle =
-            await this.prisma.vehicle.create({
-              data: {
-                vehicleName:
-                  vehicleNumber,
+          vehicle = await this.prisma.vehicle.create({
+            data: {
+              vehicleName: vehicleNumber,
 
-                vehicleNumber,
+              vehicleNumber,
 
-                gpsDeviceId:
-                  vehicleNumber,
+              gpsDeviceId: vehicleNumber,
 
-                providerName:
-                  'airotrack',
+              providerName: 'airotrack',
 
-                providerVehicleId:
-                  vehicleNumber,
+              providerVehicleId: vehicleNumber,
 
-                driverName:
-                  'Unknown Driver',
+              driverName: 'Unknown Driver',
 
-                clientName:
-                  'FleetTrack',
+              clientName: 'FleetTrack',
 
-                ignition:
-                  item.ignition || false,
+              ignition: item.ignition || false,
 
-                batteryVoltage:
-                  item.power || 0,
+              batteryVoltage: item.power || 0,
 
-                charge:
-                  item.charge || false,
+              charge: item.charge || false,
 
-                isOnline: true,
+              isOnline: true,
 
-                status,
+              status,
 
-                latitude:
-                  item.lat || 0,
+              latitude: item.lat || 0,
 
-                longitude:
-                  item.long || 0,
+              longitude: item.long || 0,
 
-                speed:
-                  item.speed || 0,
+              speed: item.speed || 0,
 
-                lastSeenAt:
-                  new Date(),
+              lastSeenAt: new Date(),
 
-                lastProviderUpdate:
-                  new Date(
-                    item.last_updated,
-                  ),
-              },
-            });
+              lastProviderUpdate: new Date(item.last_updated),
+            },
+          });
 
-          this.logger.log(
-            `Created vehicle: ${vehicleNumber}`,
-          );
+          this.logger.log(`Created vehicle: ${vehicleNumber}`);
 
           continue;
         }
@@ -118,69 +89,51 @@ export class TrackingService {
         /* UPDATE VEHICLE */
         /* ------------------------------ */
 
-        const updatedVehicle =
-          await this.prisma.vehicle.update({
-            where: {
-              vehicleNumber,
-            },
+        const updatedVehicle = await this.prisma.vehicle.update({
+          where: {
+            vehicleNumber,
+          },
 
-            data: {
-              ignition:
-                item.ignition || false,
+          data: {
+            ignition: item.ignition || false,
 
-              batteryVoltage:
-                item.power || 0,
+            batteryVoltage: item.power || 0,
 
-              charge:
-                item.charge || false,
+            charge: item.charge || false,
 
-              isOnline: true,
+            isOnline: true,
 
-              status,
+            status,
 
-              latitude:
-                item.lat || 0,
+            latitude: item.lat || 0,
 
-              longitude:
-                item.long || 0,
+            longitude: item.long || 0,
 
-              speed:
-                item.speed || 0,
+            speed: item.speed || 0,
 
-              lastSeenAt:
-                new Date(),
+            lastSeenAt: new Date(),
 
-              lastProviderUpdate:
-                new Date(
-                  item.last_updated,
-                ),
-            },
-          });
+            lastProviderUpdate: new Date(item.last_updated),
+          },
+        });
 
         /* ------------------------------ */
         /* SAVE LOCATION HISTORY */
         /* ------------------------------ */
 
-        await this.prisma.vehicleLocationHistory.create(
-          {
-            data: {
-              vehicleId:
-                updatedVehicle.id,
+        await this.prisma.vehicleLocationHistory.create({
+          data: {
+            vehicleId: updatedVehicle.id,
 
-              latitude:
-                item.lat || 0,
+            latitude: item.lat || 0,
 
-              longitude:
-                item.long || 0,
+            longitude: item.long || 0,
 
-              speed:
-                item.speed || 0,
+            speed: item.speed || 0,
 
-              ignition:
-                item.ignition || false,
-            },
+            ignition: item.ignition || false,
           },
-        );
+        });
 
         /* ------------------------------ */
         /* SOCKET EMIT */
@@ -192,15 +145,11 @@ export class TrackingService {
         );
       }
 
-      this.logger.log(
-        'Vehicle sync completed',
-      );
+      this.logger.log('Vehicle sync completed');
     } catch (error) {
       console.log(error);
 
-      this.logger.error(
-        'AiroTrack sync failed',
-      );
+      this.logger.error('AiroTrack sync failed');
     }
   }
 
@@ -211,54 +160,42 @@ export class TrackingService {
   @Cron('0 */1 * * * *')
   async detectOfflineVehicles() {
     try {
-      const fiveMinutesAgo =
-        new Date(
-          Date.now() -
-            5 * 60 * 1000,
-        );
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
-      const offlineVehicles =
-        await this.prisma.vehicle.findMany(
-          {
-            where: {
-              lastSeenAt: {
-                lt: fiveMinutesAgo,
-              },
-
-              isOnline: true,
-            },
+      const offlineVehicles = await this.prisma.vehicle.findMany({
+        where: {
+          lastSeenAt: {
+            lt: fiveMinutesAgo,
           },
-        );
+
+          isOnline: true,
+        },
+      });
 
       for (const vehicle of offlineVehicles) {
-        const updatedVehicle =
-          await this.prisma.vehicle.update({
-            where: {
-              id: vehicle.id,
-            },
+        const updatedVehicle = await this.prisma.vehicle.update({
+          where: {
+            id: vehicle.id,
+          },
 
-            data: {
-              isOnline: false,
+          data: {
+            isOnline: false,
 
-              status: 'OFFLINE',
-            },
-          });
+            status: 'OFFLINE',
+          },
+        });
 
         this.trackingGateway.server.emit(
           'vehicleLocationUpdate',
           updatedVehicle,
         );
 
-        this.logger.warn(
-          `Vehicle offline: ${vehicle.vehicleNumber}`,
-        );
+        this.logger.warn(`Vehicle offline: ${vehicle.vehicleNumber}`);
       }
     } catch (error) {
       console.log(error);
 
-      this.logger.error(
-        'Offline detection failed',
-      );
+      this.logger.error('Offline detection failed');
     }
   }
 }
