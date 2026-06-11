@@ -98,17 +98,40 @@ export class VehiclesService {
       throw new NotFoundException('Vehicle not found');
     }
 
-    const history = await this.prisma.vehicleLocationHistory.findMany({
+    /* ------------------------------------------------------- */
+    /* Fetch last 300 history points ordered newest-first,      */
+    /* then reverse so the frontend gets chronological order.   */
+    /* Filter out null-island (0,0) coordinates.               */
+    /* ------------------------------------------------------- */
+
+    const raw = await this.prisma.vehicleLocationHistory.findMany({
       where: {
         vehicleId: id,
+        // Exclude 0,0 "null island" coordinates
+        NOT: {
+          AND: [{ latitude: 0 }, { longitude: 0 }],
+        },
       },
-
       orderBy: {
-        createdAt: 'asc',
+        createdAt: 'desc',
       },
-
-      take: 500,
+      take: 300,
     });
+
+    // Reverse to chronological order (oldest → newest)
+    const history = raw
+      .reverse()
+      .map((item) => ({
+        id: item.id,
+        vehicleId: item.vehicleId,
+        latitude: item.latitude,
+        longitude: item.longitude,
+        speed: item.speed,
+        ignition: item.ignition,
+        heading: item.heading,
+        timestamp: item.createdAt.getTime(), // Unix ms for frontend sorting
+        createdAt: item.createdAt,
+      }));
 
     return {
       success: true,
@@ -214,7 +237,10 @@ export class VehiclesService {
       },
     });
 
-    this.trackingGateway.server.emit('vehicleLocationUpdate', updatedVehicle);
+    this.trackingGateway.server.emit('vehicleLocationUpdate', {
+      ...updatedVehicle,
+      timestamp: Date.now(),
+    });
 
     return {
       success: true,

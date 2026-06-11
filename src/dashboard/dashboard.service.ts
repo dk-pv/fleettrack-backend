@@ -18,11 +18,17 @@ export class DashboardService {
 
     let offlineVehicles = 0;
 
+    let idleVehicles = 0;
+
     vehicles.forEach((vehicle) => {
       const status = getVehicleStatus(vehicle.ignition, vehicle.speed);
 
-      if (status === 'MOVING' || status === 'IDLE') {
+      if (status === 'MOVING') {
         activeVehicles++;
+      }
+
+      if (status === 'IDLE') {
+        idleVehicles++;
       }
 
       if (status === 'OFFLINE') {
@@ -37,6 +43,7 @@ export class DashboardService {
         totalVehicles,
         activeVehicles,
         offlineVehicles,
+        idleVehicles,
       },
     };
   }

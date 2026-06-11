@@ -16,93 +16,58 @@ model User {
   createdAt DateTime @default(now())
 }
 
+model Vehicle {
+  id                 String                   @id @default(cuid())
+  vehicleName        String
+  vehicleNumber      String                   @unique
+  gpsDeviceId        String
+  driverName         String
+  clientName         String
+  status             VehicleStatus            @default(IDLE)
+  latitude           Float                    @default(0)
+  longitude          Float                    @default(0)
+  speed              Float                    @default(0)
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  batteryVoltage     Float?                   @default(0)
+  charge             Boolean                  @default(false)
+  ignition           Boolean                  @default(false)
+  isOnline           Boolean                  @default(true)
+  lastProviderUpdate DateTime?
+  lastSeenAt         DateTime?
+  providerName       String?
+  providerVehicleId  String?
+  locationHistory    VehicleLocationHistory[]
+
+  @@index([vehicleNumber])
+  @@index([status])
+  @@index([lastProviderUpdate])
+}
+
+model VehicleLocationHistory {
+  id        String   @id @default(cuid())
+  vehicleId String
+  latitude  Float
+  longitude Float
+  speed     Float
+  ignition  Boolean
+  heading   Float    @default(0)
+  createdAt DateTime @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+  @@index([createdAt])
+}
+
 enum Role {
   ADMIN
   FLEET_MANAGER
   VIEWER
 }
 
-
-
-model Vehicle {
-  id                 String         @id @default(cuid())
-
-  vehicleName        String
-
-  vehicleNumber      String         @unique
-
-  gpsDeviceId        String
-
-  providerName       String?
-
-  providerVehicleId  String?
-
-  driverName         String
-
-  clientName         String
-
-  ignition           Boolean        @default(false)
-
-  batteryVoltage     Float?         @default(0)
-
-  charge             Boolean        @default(false)
-
-  isOnline           Boolean        @default(true)
-
-  status             VehicleStatus  @default(IDLE)
-
-  latitude           Float          @default(0)
-
-  longitude          Float          @default(0)
-
-  speed              Float          @default(0)
-
-  lastSeenAt         DateTime?
-
-  lastProviderUpdate DateTime?
-
-  createdAt          DateTime @default(now())
-
-  updatedAt          DateTime @updatedAt
-
-  locationHistory    VehicleLocationHistory[]
-
-
-    @@index([vehicleNumber])
-
-    @@index([status])
-
-    @@index([lastProviderUpdate])
-
-}
-
 enum VehicleStatus {
   MOVING
   IDLE
   OFFLINE
-}
-
-
-
-
-model VehicleLocationHistory {
-  id        String   @id @default(cuid())
-
-  vehicleId String
-
-  latitude  Float
-
-  longitude Float
-
-  speed     Float
-
-  ignition  Boolean
-
-  createdAt DateTime @default(now())
-
-  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
-
-  @@index([vehicleId])
-
-  @@index([createdAt])
 }
