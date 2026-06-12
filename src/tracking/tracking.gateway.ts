@@ -12,6 +12,7 @@ import { Server } from 'socket.io';
     origin: '*',
   },
 })
+
 export class TrackingGateway
   implements OnGatewayInit
 {
