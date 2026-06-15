@@ -107,31 +107,34 @@ export class VehiclesService {
     const raw = await this.prisma.vehicleLocationHistory.findMany({
       where: {
         vehicleId: id,
-        // Exclude 0,0 "null island" coordinates
+
+        createdAt: {
+          gte: new Date(Date.now() - 60 * 60 * 1000), // last 1 hour
+        },
+
         NOT: {
           AND: [{ latitude: 0 }, { longitude: 0 }],
         },
       },
+
       orderBy: {
         createdAt: 'desc',
       },
+
       take: 300,
     });
-
     // Reverse to chronological order (oldest → newest)
-    const history = raw
-      .reverse()
-      .map((item) => ({
-        id: item.id,
-        vehicleId: item.vehicleId,
-        latitude: item.latitude,
-        longitude: item.longitude,
-        speed: item.speed,
-        ignition: item.ignition,
-        heading: item.heading,
-        timestamp: item.createdAt.getTime(), // Unix ms for frontend sorting
-        createdAt: item.createdAt,
-      }));
+    const history = raw.reverse().map((item) => ({
+      id: item.id,
+      vehicleId: item.vehicleId,
+      latitude: item.latitude,
+      longitude: item.longitude,
+      speed: item.speed,
+      ignition: item.ignition,
+      heading: item.heading,
+      timestamp: item.createdAt.getTime(), // Unix ms for frontend sorting
+      createdAt: item.createdAt,
+    }));
 
     return {
       success: true,
