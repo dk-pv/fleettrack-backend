@@ -62,7 +62,7 @@ model VehicleLocationHistory {
 
 enum Role {
   ADMIN
-  FLEET_MANAGER
+  CLIENT
   VIEWER
 }
 

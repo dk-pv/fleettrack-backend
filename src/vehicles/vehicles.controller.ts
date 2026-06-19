@@ -25,35 +25,35 @@ export class VehiclesController {
   constructor(private readonly vehiclesService: VehiclesService) {}
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER')
+  @Roles('ADMIN', 'CLIENT')
   @Post()
   create(@Body() body: any) {
     return this.vehiclesService.create(body);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER', 'VIEWER')
+  @Roles('ADMIN', 'CLIENT', 'VIEWER')
   @Get()
   findAll() {
     return this.vehiclesService.findAll();
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER', 'VIEWER')
+  @Roles('ADMIN', 'CLIENT', 'VIEWER')
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.vehiclesService.findOne(id);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER', 'VIEWER')
+  @Roles('ADMIN', 'CLIENT', 'VIEWER')
   @Get(':id/history')
   getVehicleHistory(@Param('id') id: string) {
     return this.vehiclesService.getVehicleHistory(id);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER')
+  @Roles('ADMIN', 'CLIENT')
   @Patch(':id')
   update(@Param('id') id: string, @Body() body: any) {
     return this.vehiclesService.update(id, body);
@@ -67,14 +67,14 @@ export class VehiclesController {
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER')
+  @Roles('ADMIN', 'CLIENT')
   @Patch(':id/location')
   updateLocation(@Param('id') id: string, @Body() body: any) {
     return this.vehiclesService.updateLocation(id, body);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN', 'FLEET_MANAGER', 'VIEWER')
+  @Roles('ADMIN', 'CLIENT', 'VIEWER')
   @Get(':id/report')
   async generateReport(@Param('id') id: string, @Res() res: Response) {
     const pdfBuffer = await this.vehiclesService.generateVehicleReport(id);
