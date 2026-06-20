@@ -1,79 +1,55 @@
 import {
-  BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
-import { TrackingGateway } from '../tracking/tracking.gateway';
 
 @Injectable()
 export class VehiclesService {
-  constructor(
-    private prisma: PrismaService,
-    private trackingGateway: TrackingGateway,
-  ) {}
+  constructor(private prisma: PrismaService) {}
 
-  async create(body: any) {
-    const {
-      vehicleName,
-      vehicleNumber,
-      gpsDeviceId,
-      driverName,
-      clientName,
-      status,
-      latitude,
-      longitude,
-      speed,
-    } = body;
+  async findAll(user: any, selectedClientId?: string) {
+  let where: any = {};
 
-    const existingVehicle = await this.prisma.vehicle.findUnique({
-      where: {
-        vehicleNumber,
-      },
-    });
-
-    if (existingVehicle) {
-      throw new BadRequestException('Vehicle number already exists');
-    }
-
-    const vehicle = await this.prisma.vehicle.create({
-      data: {
-        vehicleName,
-        vehicleNumber,
-        gpsDeviceId,
-        driverName,
-        clientName,
-        status,
-        latitude,
-        longitude,
-        speed,
-      },
-    });
-
-    return {
-      success: true,
-      vehicle,
-    };
+  // ADMIN selected specific client
+  if (user.role === 'ADMIN' && selectedClientId) {
+    where.clientId = selectedClientId;
   }
 
-  async findAll() {
-    const vehicles = await this.prisma.vehicle.findMany({
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-
-    return {
-      success: true,
-      vehicles,
-    };
+  // CLIENT login
+  if (user.role === 'CLIENT') {
+    where.clientId = user.userId;
   }
+
+  const vehicles = await this.prisma.vehicle.findMany({
+    where,
+    include: {
+      client: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: 'desc',
+    },
+  });
+
+  return {
+    success: true,
+    vehicles,
+  };
+}
 
   async findOne(id: string) {
     const vehicle = await this.prisma.vehicle.findUnique({
       where: {
         id,
+      },
+      include: {
+        client: true,
       },
     });
 
@@ -98,32 +74,22 @@ export class VehiclesService {
       throw new NotFoundException('Vehicle not found');
     }
 
-    /* ------------------------------------------------------- */
-    /* Fetch last 300 history points ordered newest-first,      */
-    /* then reverse so the frontend gets chronological order.   */
-    /* Filter out null-island (0,0) coordinates.               */
-    /* ------------------------------------------------------- */
-
     const raw = await this.prisma.vehicleLocationHistory.findMany({
       where: {
         vehicleId: id,
-
         createdAt: {
-          gte: new Date(Date.now() - 60 * 60 * 1000), // last 1 hour
+          gte: new Date(Date.now() - 60 * 60 * 1000),
         },
-
         NOT: {
           AND: [{ latitude: 0 }, { longitude: 0 }],
         },
       },
-
       orderBy: {
         createdAt: 'desc',
       },
-
       take: 300,
     });
-    // Reverse to chronological order (oldest → newest)
+
     const history = raw.reverse().map((item) => ({
       id: item.id,
       vehicleId: item.vehicleId,
@@ -132,123 +98,15 @@ export class VehiclesService {
       speed: item.speed,
       ignition: item.ignition,
       heading: item.heading,
-      timestamp: item.createdAt.getTime(), // Unix ms for frontend sorting
+      timestamp: item.createdAt.getTime(),
       createdAt: item.createdAt,
     }));
 
     return {
       success: true,
-
       vehicleId: id,
-
       total: history.length,
-
       history,
-    };
-  }
-
-  async update(id: string, body: any) {
-    const existingVehicle = await this.prisma.vehicle.findUnique({
-      where: {
-        id,
-      },
-    });
-
-    if (!existingVehicle) {
-      throw new NotFoundException('Vehicle not found');
-    }
-
-    const updatedVehicle = await this.prisma.vehicle.update({
-      where: {
-        id,
-      },
-
-      data: {
-        vehicleName: body.vehicleName,
-
-        vehicleNumber: body.vehicleNumber,
-
-        gpsDeviceId: body.gpsDeviceId,
-
-        driverName: body.driverName,
-
-        clientName: body.clientName,
-
-        status: body.status,
-
-        latitude: body.latitude,
-
-        longitude: body.longitude,
-
-        speed: body.speed,
-      },
-    });
-
-    return {
-      success: true,
-      vehicle: updatedVehicle,
-    };
-  }
-
-  async remove(id: string) {
-    const existingVehicle = await this.prisma.vehicle.findUnique({
-      where: {
-        id,
-      },
-    });
-
-    if (!existingVehicle) {
-      throw new NotFoundException('Vehicle not found');
-    }
-
-    await this.prisma.vehicle.delete({
-      where: {
-        id,
-      },
-    });
-
-    return {
-      success: true,
-      message: 'Vehicle deleted successfully',
-    };
-  }
-
-  async updateLocation(id: string, body: any) {
-    const existingVehicle = await this.prisma.vehicle.findUnique({
-      where: {
-        id,
-      },
-    });
-
-    if (!existingVehicle) {
-      throw new NotFoundException('Vehicle not found');
-    }
-
-    const updatedVehicle = await this.prisma.vehicle.update({
-      where: {
-        id,
-      },
-
-      data: {
-        latitude: body.latitude,
-
-        longitude: body.longitude,
-
-        speed: body.speed,
-
-        status: body.status,
-      },
-    });
-
-    this.trackingGateway.server.emit('vehicleLocationUpdate', {
-      ...updatedVehicle,
-      timestamp: Date.now(),
-    });
-
-    return {
-      success: true,
-
-      vehicle: updatedVehicle,
     };
   }
 
@@ -256,6 +114,9 @@ export class VehiclesService {
     const vehicle = await this.prisma.vehicle.findUnique({
       where: {
         id,
+      },
+      include: {
+        client: true,
       },
     });
 
@@ -278,48 +139,37 @@ export class VehiclesService {
         resolve(Buffer.concat(buffers));
       });
 
-      // Title
       doc.fontSize(24).text('Fleet Vehicle Report', {
         align: 'center',
       });
 
       doc.moveDown(2);
 
-      // Vehicle Details
       doc.fontSize(16).text(`Vehicle Name: ${vehicle.vehicleName}`);
-
       doc.moveDown();
 
       doc.text(`Vehicle Number: ${vehicle.vehicleNumber}`);
-
       doc.moveDown();
 
       doc.text(`Driver Name: ${vehicle.driverName}`);
-
       doc.moveDown();
 
-      doc.text(`Client Name: ${vehicle.clientName}`);
-
+      doc.text(`Client Name: ${vehicle.client.name}`);
       doc.moveDown();
 
       doc.text(`GPS Device ID: ${vehicle.gpsDeviceId}`);
-
       doc.moveDown();
 
       doc.text(`Status: ${vehicle.status}`);
-
       doc.moveDown();
 
       doc.text(`Latitude: ${vehicle.latitude}`);
-
       doc.moveDown();
 
       doc.text(`Longitude: ${vehicle.longitude}`);
-
       doc.moveDown();
 
       doc.text(`Speed: ${vehicle.speed} km/h`);
-
       doc.moveDown();
 
       doc.text(`Generated At: ${new Date().toLocaleString()}`);

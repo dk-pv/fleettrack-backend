@@ -1,27 +1,53 @@
 import {
   Controller,
   Get,
-} from "@nestjs/common";
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 
-import { DashboardService } from "./dashboard.service";
+import { DashboardService } from './dashboard.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
-@Controller("dashboard")
+@Controller('dashboard')
 export class DashboardController {
   constructor(
     private dashboardService: DashboardService,
   ) {}
 
-  /* DASHBOARD STATS */
+  @UseGuards(JwtAuthGuard)
+  @Get('stats')
+  async getDashboardStats(
+    @Req() req: any,
+    @Query('clientId') clientId?: string,
+  ) {
+    const user = req.user;
 
-  @Get("stats")
-  async getDashboardStats() {
-    return this.dashboardService.getDashboardStats();
+    const filterClientId =
+      user.role === 'CLIENT'
+        ? user.userId
+        : clientId;
+
+    return this.dashboardService.getDashboardStats(
+      filterClientId,
+    );
   }
 
-  /* ACTIVE VEHICLES */
+  @UseGuards(JwtAuthGuard)
+  @Get('active-vehicles')
+  async getActiveVehicles(
+    @Req() req: any,
+    @Query('clientId') clientId?: string,
+  ) {
+    const user = req.user;
 
-  @Get("active-vehicles")
-  async getActiveVehicles() {
-    return this.dashboardService.getActiveVehicles();
+    const filterClientId =
+      user.role === 'CLIENT'
+        ? user.userId
+        : clientId;
+
+    return this.dashboardService.getActiveVehicles(
+      filterClientId,
+    );
   }
 }

@@ -1,27 +1,30 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { getVehicleStatus } from '../common/utils/vehicle-status';
+
 @Injectable()
 export class DashboardService {
   constructor(private prisma: PrismaService) {}
 
-  /* -------------------------------- */
-  /* DASHBOARD STATS */
-  /* -------------------------------- */
-
-  async getDashboardStats() {
-    const vehicles = await this.prisma.vehicle.findMany();
+  async getDashboardStats(clientId?: string) {
+    const vehicles = await this.prisma.vehicle.findMany({
+      where: clientId
+        ? {
+            clientId,
+          }
+        : undefined,
+    });
 
     let totalVehicles = vehicles.length;
-
     let activeVehicles = 0;
-
     let offlineVehicles = 0;
-
     let idleVehicles = 0;
 
     vehicles.forEach((vehicle) => {
-      const status = getVehicleStatus(vehicle.ignition, vehicle.speed);
+      const status = getVehicleStatus(
+        vehicle.ignition,
+        vehicle.speed,
+      );
 
       if (status === 'MOVING') {
         activeVehicles++;
@@ -38,7 +41,6 @@ export class DashboardService {
 
     return {
       success: true,
-
       data: {
         totalVehicles,
         activeVehicles,
@@ -48,9 +50,14 @@ export class DashboardService {
     };
   }
 
-  /* -------------------------------- */
-  async getActiveVehicles() {
+  async getActiveVehicles(clientId?: string) {
     const vehicles = await this.prisma.vehicle.findMany({
+      where: clientId
+        ? {
+            clientId,
+          }
+        : undefined,
+
       orderBy: {
         updatedAt: 'desc',
       },
@@ -60,27 +67,26 @@ export class DashboardService {
 
     const activeVehicles = vehicles
       .map((vehicle) => {
-        const status = getVehicleStatus(vehicle.ignition, vehicle.speed);
+        const status = getVehicleStatus(
+          vehicle.ignition,
+          vehicle.speed,
+        );
 
         return {
           id: vehicle.id,
-
           vehicleNumber: vehicle.vehicleNumber,
-
           driverName: vehicle.driverName,
-
           speed: vehicle.speed,
-
           status,
         };
       })
-
-      .filter((vehicle) => vehicle.status !== 'OFFLINE');
+      .filter(
+        (vehicle) => vehicle.status !== 'OFFLINE',
+      );
 
     return {
       success: true,
-
       data: activeVehicles,
     };
-  } 
+  }
 }

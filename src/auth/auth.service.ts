@@ -4,9 +4,7 @@ import {
 } from '@nestjs/common';
 
 import * as bcrypt from 'bcrypt';
-
 import { JwtService } from '@nestjs/jwt';
-
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -19,14 +17,23 @@ export class AuthService {
   async login(body: any) {
     const { email, password } = body;
 
-    const user =
+    let account: any =
       await this.prisma.user.findUnique({
-        where: {
-          email,
-        },
+        where: { email },
       });
 
-    if (!user) {
+    let accountType = 'USER';
+
+    if (!account) {
+      account =
+        await this.prisma.client.findUnique({
+          where: { email },
+        });
+
+      accountType = 'CLIENT';
+    }
+
+    if (!account) {
       throw new UnauthorizedException(
         'Invalid email',
       );
@@ -35,7 +42,7 @@ export class AuthService {
     const isPasswordValid =
       await bcrypt.compare(
         password,
-        user.password,
+        account.password,
       );
 
     if (!isPasswordValid) {
@@ -44,19 +51,31 @@ export class AuthService {
       );
     }
 
-    const token =
-      this.jwtService.sign({
-        userId: user.id,
-        role: user.role,
-      });
+    const token = this.jwtService.sign({
+      userId: account.id,
+      role:
+        accountType === 'CLIENT'
+          ? 'CLIENT'
+          : account.role,
+      accountType,
+    });
 
-    const { password: _, ...safeUser } =
-      user;
+    const { password: _, ...safeAccount } =
+      account;
+
+    const normalizedUser = {
+      ...safeAccount,
+      role:
+        accountType === 'CLIENT'
+          ? 'CLIENT'
+          : safeAccount.role,
+    };
 
     return {
       success: true,
       token,
-      user: safeUser,
+      user: normalizedUser,
+      accountType,
     };
   }
 }

@@ -10,11 +10,8 @@ import {
 } from '@nestjs/common';
 
 import { ClientsService } from './clients.service';
-
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-
 import { RolesGuard } from '../auth/roles.guard';
-
 import { Roles } from '../auth/roles.decorator';
 
 @Controller('clients')
@@ -28,7 +25,8 @@ export class ClientsController {
     return this.clientsService.create(body);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
   @Get()
   findAll() {
     return this.clientsService.findAll();

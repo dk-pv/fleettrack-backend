@@ -13,66 +13,66 @@ export class ClientsService {
   constructor(private prisma: PrismaService) {}
 
   async create(body: any) {
-    const { name, email, password, role } = body;
+    const { name, email, password, apiUrl } = body;
 
-    const existingUser = await this.prisma.user.findUnique({
+    const existingClient = await this.prisma.client.findUnique({
       where: {
         email,
       },
     });
 
-    if (existingUser) {
+    if (existingClient) {
       throw new BadRequestException('Email already exists');
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const user = await this.prisma.user.create({
+    const client = await this.prisma.client.create({
       data: {
         name,
         email,
         password: hashedPassword,
-        role,
+        apiUrl,
       },
     });
 
-    const { password: _, ...safeUser } = user;
+    const { password: _, ...safeClient } = client;
 
     return {
       success: true,
-      user: safeUser,
+      client: safeClient,
     };
   }
 
-  async findAll() {
-    const users = await this.prisma.user.findMany({
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+async findAll() {
+  const clients = await this.prisma.client.findMany({
+    orderBy: {
+      createdAt: "desc",
+    },
+  });
 
-    const safeUsers = users.map(({ password, ...user }) => user);
+  const safeClients = clients.map(({ password, ...client }) => client);
 
-    return {
-      success: true,
-      users: safeUsers,
-    };
-  }
+  return {
+    success: true,
+    clients: safeClients,
+  };
+}
 
   async update(id: string, body: any) {
-    const { name, email, role } = body;
+    const { name, email, apiUrl  } = body;
 
-    const existingUser = await this.prisma.user.findUnique({
+    const existingClient = await this.prisma.client.findUnique({
       where: {
         id,
       },
     });
 
-    if (!existingUser) {
-      throw new NotFoundException('User not found');
+    if (!existingClient) {
+      throw new NotFoundException('Client not found');
     }
 
-    const updatedUser = await this.prisma.user.update({
+    const updatedClient = await this.prisma.client.update({
       where: {
         id,
       },
@@ -80,30 +80,30 @@ export class ClientsService {
       data: {
         name,
         email,
-        role,
+        apiUrl,
       },
     });
 
-    const { password: _, ...safeUser } = updatedUser;
+    const { password: _, ...safeClient } = updatedClient;
 
     return {
       success: true,
-      user: safeUser,
+      client: safeClient,
     };
   }
 
   async remove(id: string) {
-    const existingUser = await this.prisma.user.findUnique({
+    const existingClient = await this.prisma.client.findUnique({
       where: {
         id,
       },
     });
 
-    if (!existingUser) {
-      throw new NotFoundException('User not found');
+    if (!existingClient) {
+      throw new NotFoundException('Client not found');
     }
 
-    await this.prisma.user.delete({
+    await this.prisma.client.delete({
       where: {
         id,
       },
@@ -111,7 +111,7 @@ export class ClientsService {
 
     return {
       success: true,
-      message: 'User deleted',
+      message: 'Client deleted',
     };
   }
 }

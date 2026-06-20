@@ -16,32 +16,49 @@ model User {
   createdAt DateTime @default(now())
 }
 
+model Client {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  password  String
+  apiUrl    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vehicles  Vehicle[]
+}
+
 model Vehicle {
-  id                 String                   @id @default(cuid())
+  id                 String @id @default(cuid())
   vehicleName        String
-  vehicleNumber      String                   @unique
+  vehicleNumber      String 
   gpsDeviceId        String
   driverName         String
-  clientName         String
-  status             VehicleStatus            @default(IDLE)
-  latitude           Float                    @default(0)
-  longitude          Float                    @default(0)
-  speed              Float                    @default(0)
-  createdAt          DateTime                 @default(now())
-  updatedAt          DateTime                 @updatedAt
-  batteryVoltage     Float?                   @default(0)
-  charge             Boolean                  @default(false)
-  ignition           Boolean                  @default(false)
-  isOnline           Boolean                  @default(true)
+
+  clientId           String
+  client             Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  status             VehicleStatus @default(IDLE)
+  latitude           Float @default(0)
+  longitude          Float @default(0)
+  speed              Float @default(0)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  batteryVoltage     Float? @default(0)
+  charge             Boolean @default(false)
+  ignition           Boolean @default(false)
+  isOnline           Boolean @default(true)
+
   lastProviderUpdate DateTime?
   lastSeenAt         DateTime?
+
   providerName       String?
   providerVehicleId  String?
-  locationHistory    VehicleLocationHistory[]
 
-  @@index([vehicleNumber])
-  @@index([status])
-  @@index([lastProviderUpdate])
+  locationHistory    VehicleLocationHistory[]
+  @@unique([clientId, vehicleNumber])
 }
 
 model VehicleLocationHistory {
@@ -62,7 +79,6 @@ model VehicleLocationHistory {
 
 enum Role {
   ADMIN
-  CLIENT
   VIEWER
 }
 
