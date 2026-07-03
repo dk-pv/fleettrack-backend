@@ -51,42 +51,33 @@ export class DashboardService {
   }
 
   async getActiveVehicles(clientId?: string) {
-    const vehicles = await this.prisma.vehicle.findMany({
-      where: clientId
-        ? {
-            clientId,
-          }
-        : undefined,
+  const vehicles = await this.prisma.vehicle.findMany({
+    where: {
+      ...(clientId ? { clientId } : {}),
+      ignition: true,
+    },
 
-      orderBy: {
-        updatedAt: 'desc',
-      },
+    orderBy: {
+      updatedAt: "desc",
+    },
 
-      take: 5,
-    });
+    take: 5,
+  });
 
-    const activeVehicles = vehicles
-      .map((vehicle) => {
-        const status = getVehicleStatus(
-          vehicle.ignition,
-          vehicle.speed,
-        );
+  const activeVehicles = vehicles.map((vehicle) => ({
+    id: vehicle.id,
+    vehicleNumber: vehicle.vehicleNumber,
+    driverName: vehicle.driverName,
+    speed: vehicle.speed,
+    status: getVehicleStatus(
+      vehicle.ignition,
+      vehicle.speed
+    ),
+  }));
 
-        return {
-          id: vehicle.id,
-          vehicleNumber: vehicle.vehicleNumber,
-          driverName: vehicle.driverName,
-          speed: vehicle.speed,
-          status,
-        };
-      })
-      .filter(
-        (vehicle) => vehicle.status !== 'OFFLINE',
-      );
-
-    return {
-      success: true,
-      data: activeVehicles,
-    };
-  }
+  return {
+    success: true,
+    data: activeVehicles,
+  };
+}
 }

@@ -64,7 +64,18 @@ export class TrackingService {
     private trackingGateway: TrackingGateway,
   ) {}
 
-  @Cron('*/20 * * * * *')
+  /**
+   * Transient DB connectivity errors (e.g. Neon serverless cold-start or idle
+   * disconnect). Safe to skip — the next scheduled tick retries.
+   */
+  private isTransientDbError(error: unknown): boolean {
+    const e = error as { code?: string; errorCode?: string };
+    const code = e?.code ?? e?.errorCode;
+    return code === 'P1001' || code === 'P1002' || code === 'P1017';
+  }
+
+  // Every 60s (was 20s) — gentler on the serverless DB, less cold-start churn.
+  @Cron('0 * * * * *')
   async syncVehicles() {
     try {
       const clients = await this.prisma.client.findMany();
@@ -209,15 +220,31 @@ export class TrackingService {
             );
           }
         } catch (clientError) {
+          if (this.isTransientDbError(clientError)) {
+            this.logger.warn(
+              `DB temporarily unreachable while syncing ${client.name} — skipping`,
+            );
+            continue;
+          }
           this.logger.error(
             `Client sync failed: ${client.name}`,
+            clientError instanceof Error
+              ? clientError.stack
+              : String(clientError),
           );
-          console.log(clientError);
         }
       }
     } catch (error) {
-      console.log(error);
-      this.logger.error('Vehicle sync failed');
+      if (this.isTransientDbError(error)) {
+        this.logger.warn(
+          'DB temporarily unreachable — skipping this sync tick',
+        );
+        return;
+      }
+      this.logger.error(
+        'Vehicle sync failed',
+        error instanceof Error ? error.stack : String(error),
+      );
     }
   }
 
@@ -259,8 +286,16 @@ export class TrackingService {
         );
       }
     } catch (error) {
-      console.log(error);
-      this.logger.error('Offline detection failed');
+      if (this.isTransientDbError(error)) {
+        this.logger.warn(
+          'DB temporarily unreachable — skipping offline detection',
+        );
+        return;
+      }
+      this.logger.error(
+        'Offline detection failed',
+        error instanceof Error ? error.stack : String(error),
+      );
     }
   }
 }

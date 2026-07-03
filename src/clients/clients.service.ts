@@ -44,23 +44,23 @@ export class ClientsService {
     };
   }
 
-async findAll() {
-  const clients = await this.prisma.client.findMany({
-    orderBy: {
-      createdAt: "desc",
-    },
-  });
+  async findAll() {
+    const clients = await this.prisma.client.findMany({
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
 
-  const safeClients = clients.map(({ password, ...client }) => client);
+    const safeClients = clients.map(({ password, ...client }) => client);
 
-  return {
-    success: true,
-    clients: safeClients,
-  };
-}
+    return {
+      success: true,
+      clients: safeClients,
+    };
+  }
 
   async update(id: string, body: any) {
-    const { name, email, apiUrl  } = body;
+    const { name, email, apiUrl } = body;
 
     const existingClient = await this.prisma.client.findUnique({
       where: {
@@ -94,19 +94,19 @@ async findAll() {
 
   async remove(id: string) {
     const existingClient = await this.prisma.client.findUnique({
-      where: {
-        id,
-      },
+      where: { id },
     });
 
     if (!existingClient) {
       throw new NotFoundException('Client not found');
     }
 
+    await this.prisma.vehicle.deleteMany({
+      where: { clientId: id },
+    });
+
     await this.prisma.client.delete({
-      where: {
-        id,
-      },
+      where: { id },
     });
 
     return {
