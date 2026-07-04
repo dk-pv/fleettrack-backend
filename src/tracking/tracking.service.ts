@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrackingGateway } from './tracking.gateway';
-import { VehicleStatus } from '@prisma/client';
+import { TripStatus, VehicleStatus } from '@prisma/client';
 
 function haversineDistance(
   lat1: number,
@@ -54,6 +54,13 @@ function isValidCoord(lat: number, lng: number): boolean {
 }
 
 const MIN_SAVE_DISTANCE_METERS = 10;
+
+/** Trip statuses that are actively travelling and should record GPS breadcrumbs. */
+const ACTIVE_TRIP_STATUSES: TripStatus[] = [
+  TripStatus.STARTED,
+  TripStatus.ONGOING,
+  TripStatus.DELAYED,
+];
 
 @Injectable()
 export class TrackingService {
@@ -208,6 +215,16 @@ export class TrackingService {
                     heading,
                   },
                 });
+
+                // Append a breadcrumb to any trip this vehicle is actively
+                // running, reusing the same 10m movement filter + heading above
+                // (no duplicate GPS logic).
+                await this.recordTripBreadcrumbs(updatedVehicle.id, {
+                  lat,
+                  lng,
+                  speed: item.speed || 0,
+                  heading,
+                });
               }
             }
 
@@ -295,6 +312,43 @@ export class TrackingService {
       this.logger.error(
         'Offline detection failed',
         error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
+
+  /**
+   * Append a GPS breadcrumb to every trip this vehicle is actively running, so a
+   * completed trip can later replay its real travelled route. Called only when the
+   * vehicle has moved far enough to persist (reuses the location-history filter).
+   */
+  private async recordTripBreadcrumbs(
+    vehicleId: string,
+    point: { lat: number; lng: number; speed: number; heading: number },
+  ) {
+    try {
+      const activeTrips = await this.prisma.trip.findMany({
+        where: { vehicleId, status: { in: ACTIVE_TRIP_STATUSES } },
+        select: { id: true },
+      });
+
+      if (activeTrips.length === 0) return;
+
+      await this.prisma.tripBreadcrumb.createMany({
+        data: activeTrips.map((trip) => ({
+          tripId: trip.id,
+          latitude: point.lat,
+          longitude: point.lng,
+          speed: point.speed,
+          heading: point.heading,
+        })),
+      });
+    } catch (error) {
+      // Breadcrumb recording is secondary — never let it disrupt vehicle sync or
+      // the live location broadcast. The next tick retries.
+      this.logger.warn(
+        `Failed to record trip breadcrumbs for vehicle ${vehicleId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
     }
   }

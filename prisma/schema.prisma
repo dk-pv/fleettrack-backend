@@ -26,6 +26,7 @@ model Client {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   vehicles  Vehicle[]
+  trips     Trip[]
 }
 
 model Vehicle {
@@ -51,6 +52,7 @@ model Vehicle {
   providerVehicleId  String?
   client             Client                   @relation(fields: [clientId], references: [id], onDelete: Cascade)
   locationHistory    VehicleLocationHistory[]
+  trips              Trip[]
 
   @@unique([clientId, vehicleNumber])
 }
@@ -79,4 +81,106 @@ enum VehicleStatus {
   MOVING
   IDLE
   OFFLINE
+}
+
+enum TripStatus {
+  PLANNED
+  ASSIGNED
+  STARTED
+  ONGOING
+  DELAYED
+  COMPLETED
+  CANCELLED
+}
+
+enum TripEventAction {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+}
+
+model Trip {
+  id             String     @id @default(cuid())
+  reference      String
+  status         TripStatus @default(PLANNED)
+
+  // Owner (the client that manages the trip)
+  clientId       String
+  client         Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  // Assignment (nullable until assigned)
+  vehicleId      String?
+  vehicle        Vehicle?   @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  driverId       String?
+  driverName     String?
+
+  // Route (coords optional — geocoded on create)
+  origin         String
+  originLat      Float?
+  originLng      Float?
+  destination    String
+  destinationLat Float?
+  destinationLng Float?
+
+  distanceKm     Float      @default(0)
+  durationMins   Int        @default(0)
+  notes          String?
+
+  scheduledStart DateTime
+  scheduledEnd   DateTime
+  startedAt      DateTime?
+  completedAt    DateTime?
+
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  stops          TripStop[]
+  events         TripEvent[]
+  breadcrumbs    TripBreadcrumb[]
+
+  @@index([clientId])
+  @@index([vehicleId])
+}
+
+model TripStop {
+  id       String @id @default(cuid())
+  tripId   String
+  trip     Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  address  String
+  sequence Int
+  lat      Float?
+  lng      Float?
+
+  @@index([tripId])
+}
+
+model TripEvent {
+  id        String          @id @default(cuid())
+  tripId    String
+  trip      Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  action    TripEventAction
+  status    TripStatus?
+  note      String?
+  actorRole String
+  actorName String?
+  createdAt DateTime        @default(now())
+
+  @@index([tripId])
+}
+
+// GPS breadcrumb recorded server-side from the vehicle feed while a trip is active,
+// so a completed trip can replay its actual travelled route (mirrors
+// VehicleLocationHistory but scoped to a trip).
+model TripBreadcrumb {
+  id        String   @id @default(cuid())
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  latitude  Float
+  longitude Float
+  speed     Float    @default(0)
+  heading   Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([tripId])
+  @@index([createdAt])
 }
