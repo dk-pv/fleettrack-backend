@@ -9,6 +9,7 @@ import { TrackingModule } from './tracking/tracking.module';
 import { UsersModule } from './users/users.module';
 import { TripsModule } from './trips/trips.module';
 import { GeocodingModule } from './geocoding/geocoding.module';
+import { CustomersModule } from './customers/customers.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { GeocodingModule } from './geocoding/geocoding.module';
     UsersModule,
     TripsModule,
     GeocodingModule,
+    CustomersModule,
   ],
 })
 export class AppModule {}

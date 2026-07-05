@@ -39,6 +39,12 @@ const TRANSITIONS: Record<TripStatus, TripStatus[]> = {
   CANCELLED: [],
 };
 
+/** Stops may only be added / removed / reordered before a trip starts (TM-05). */
+const STOP_EDITABLE_STATUSES: TripStatus[] = [
+  TripStatus.PLANNED,
+  TripStatus.ASSIGNED,
+];
+
 const tripInclude = {
   client: { select: { id: true, name: true } },
   vehicle: { select: { id: true, vehicleNumber: true, vehicleName: true } },
@@ -220,10 +226,16 @@ export class TripsService {
     );
     const stops = await this.resolveStopCoords(dto.stops ?? []);
 
+    // TM-01.2: a trip created with both a vehicle and a driver is already
+    // assigned, so it persists as ASSIGNED; it only rests in PLANNED when
+    // created without an assignment.
+    const initialStatus =
+      dto.vehicleId && dto.driverId ? TripStatus.ASSIGNED : TripStatus.PLANNED;
+
     const trip = await this.prisma.trip.create({
       data: {
         reference: dto.reference ?? this.generateReference(),
-        status: TripStatus.PLANNED,
+        status: initialStatus,
         clientId: user.userId, // owner is always the authenticated client
         vehicleId: dto.vehicleId ?? null,
         driverId: dto.driverId ?? null,
@@ -245,8 +257,8 @@ export class TripsService {
         events: {
           create: {
             action: TripEventAction.CREATED,
-            status: TripStatus.PLANNED,
-            note: STATUS_NOTE.PLANNED,
+            status: initialStatus,
+            note: STATUS_NOTE[initialStatus],
             actorRole: actor.role,
             actorName: actor.name,
           },
@@ -260,6 +272,14 @@ export class TripsService {
 
   async update(user: AuthUser, id: string, dto: UpdateTripDto) {
     const existing = await this.getOwned(user, id);
+
+    // TM-05.1: stops may only be edited before the trip starts.
+    if (
+      dto.stops !== undefined &&
+      !STOP_EDITABLE_STATUSES.includes(existing.status)
+    ) {
+      throw new BadRequestException('STOPS_LOCKED');
+    }
 
     // Re-check availability against the effective resource + window after the
     // patch, excluding this trip from its own check.
@@ -317,6 +337,17 @@ export class TripsService {
       data.destination = dto.destination;
       data.destinationLat = destination.lat;
       data.destinationLng = destination.lng;
+    }
+
+    // TM-05.1: replace the whole stop list — delete existing stops and recreate
+    // them in the new order with a fresh 1-based sequence + geocoded coords. One
+    // atomic write covers add / remove / reorder.
+    if (dto.stops !== undefined) {
+      const stops = await this.resolveStopCoords(dto.stops);
+      data.stops = {
+        deleteMany: {},
+        create: stops,
+      };
     }
 
     const trip = await this.prisma.trip.update({

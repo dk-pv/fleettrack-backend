@@ -184,3 +184,37 @@ model TripBreadcrumb {
   @@index([tripId])
   @@index([createdAt])
 }
+
+// Customer directory (shipper / receiver / corporate) — master data managed by
+// the admin (CUS-01/02). Phase 1: core identity + type; trip history (CUS-07),
+// contact/tax (CUS-03/04) and address book (CUS-05/06) are deferred.
+enum CustomerType {
+  SHIPPER
+  RECEIVER
+  CORPORATE
+}
+
+model Customer {
+  id                 String       @id @default(cuid())
+  name               String
+  type               CustomerType
+
+  // Contact information (CUS-03.1)
+  company            String?
+  contactPerson      String?
+  email              String?
+  phone              String?
+  address            String?
+
+  // Tax / registration details (CUS-04.1)
+  taxId              String?
+  registrationNumber String?
+
+  // Free-text notes (CUS-08.1)
+  notes              String?
+
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([type])
+}

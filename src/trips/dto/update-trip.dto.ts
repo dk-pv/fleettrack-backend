@@ -1,4 +1,13 @@
-import { IsDateString, IsNumber, IsOptional, IsString } from 'class-validator';
+import {
+  IsArray,
+  IsDateString,
+  IsNumber,
+  IsOptional,
+  IsString,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+import { CreateTripStopDto } from './create-trip.dto';
 
 export class UpdateTripDto {
   @IsOptional()
@@ -24,6 +33,14 @@ export class UpdateTripDto {
   @IsOptional()
   @IsString()
   destination?: string;
+
+  // TM-05.1: the full ordered stop list. When present, replaces the trip's stops
+  // (add / remove / reorder in one write); the server re-sequences and geocodes.
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateTripStopDto)
+  stops?: CreateTripStopDto[];
 
   @IsOptional()
   @IsNumber()
