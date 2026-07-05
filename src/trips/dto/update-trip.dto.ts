@@ -26,6 +26,11 @@ export class UpdateTripDto {
   @IsString()
   driverName?: string;
 
+  // Customer this trip is for (CUS-07) — optional link.
+  @IsOptional()
+  @IsString()
+  customerId?: string;
+
   @IsOptional()
   @IsString()
   origin?: string;

@@ -27,6 +27,7 @@ model Client {
   updatedAt DateTime  @updatedAt
   vehicles  Vehicle[]
   trips     Trip[]
+  customers Customer[]
 }
 
 model Vehicle {
@@ -114,6 +115,10 @@ model Trip {
   driverId       String?
   driverName     String?
 
+  // Customer this trip is for (CUS-07) — nullable; detaches on customer delete
+  customerId     String?
+  customer       Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
   // Route (coords optional — geocoded on create)
   origin         String
   originLat      Float?
@@ -140,6 +145,7 @@ model Trip {
 
   @@index([clientId])
   @@index([vehicleId])
+  @@index([customerId])
 }
 
 model TripStop {
@@ -185,9 +191,9 @@ model TripBreadcrumb {
   @@index([createdAt])
 }
 
-// Customer directory (shipper / receiver / corporate) — master data managed by
-// the admin (CUS-01/02). Phase 1: core identity + type; trip history (CUS-07),
-// contact/tax (CUS-03/04) and address book (CUS-05/06) are deferred.
+// Customer directory (shipper / receiver / corporate) — tenant-owned data: each
+// customer belongs to the CLIENT that manages it (CUS-01/02). A CLIENT sees and
+// manages only its own customers; the ADMIN does not manage customers.
 enum CustomerType {
   SHIPPER
   RECEIVER
@@ -198,6 +204,10 @@ model Customer {
   id                 String       @id @default(cuid())
   name               String
   type               CustomerType
+
+  // Owning client (tenant) — a CLIENT manages only its own customers
+  clientId           String
+  client             Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   // Contact information (CUS-03.1)
   company            String?
@@ -216,5 +226,36 @@ model Customer {
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
+  // Reusable pickup/delivery address book (CUS-05 / CUS-06)
+  addresses          CustomerAddress[]
+
+  // Trips placed for this customer (CUS-07)
+  trips              Trip[]
+
+  @@index([clientId])
   @@index([type])
+}
+
+// A reusable pickup or delivery address for a customer (CUS-05 / CUS-06).
+// isDefault flags the preferred address per kind for future trip auto-selection.
+enum AddressKind {
+  PICKUP
+  DELIVERY
+}
+
+model CustomerAddress {
+  id         String      @id @default(cuid())
+  customerId String
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  kind       AddressKind
+  label      String
+  address    String
+  latitude   Float?
+  longitude  Float?
+  isDefault  Boolean     @default(false)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([customerId])
+  @@index([customerId, kind])
 }

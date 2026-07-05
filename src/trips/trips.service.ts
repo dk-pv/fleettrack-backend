@@ -48,6 +48,7 @@ const STOP_EDITABLE_STATUSES: TripStatus[] = [
 const tripInclude = {
   client: { select: { id: true, name: true } },
   vehicle: { select: { id: true, vehicleNumber: true, vehicleName: true } },
+  customer: { select: { id: true, name: true } },
   stops: { orderBy: { sequence: 'asc' as const } },
 };
 
@@ -200,6 +201,10 @@ export class TripsService {
   /* ---------------------------------------------------------------- */
 
   async create(user: AuthUser, dto: CreateTripDto) {
+    // A linked customer must belong to this client (CUS-07.1) — the server-side
+    // guarantee behind the form only listing the client's own customers.
+    await this.assertOwnedCustomer(user.userId, dto.customerId);
+
     // Reject double-booking of the vehicle/driver (409 VEHICLE_OVERLAP /
     // DRIVER_OVERLAP) — the server-side guarantee behind the client pre-check.
     await this.assertNoResourceOverlap(user.userId, {
@@ -240,6 +245,7 @@ export class TripsService {
         vehicleId: dto.vehicleId ?? null,
         driverId: dto.driverId ?? null,
         driverName: dto.driverName ?? null,
+        customerId: dto.customerId ?? null,
         origin: dto.origin,
         originLat: origin.lat,
         originLng: origin.lng,
@@ -273,6 +279,9 @@ export class TripsService {
   async update(user: AuthUser, id: string, dto: UpdateTripDto) {
     const existing = await this.getOwned(user, id);
 
+    // A (re)linked customer must belong to this client (CUS-07.1).
+    await this.assertOwnedCustomer(user.userId, dto.customerId);
+
     // TM-05.1: stops may only be edited before the trip starts.
     if (
       dto.stops !== undefined &&
@@ -300,6 +309,7 @@ export class TripsService {
       vehicleId: dto.vehicleId,
       driverId: dto.driverId,
       driverName: dto.driverName,
+      customerId: dto.customerId,
       distanceKm: dto.distanceKm,
       durationMins: dto.durationMins,
       notes: dto.notes,
@@ -430,6 +440,21 @@ export class TripsService {
     if (user.role === 'CLIENT' && ownerClientId !== user.userId) {
       throw new ForbiddenException('Not your trip');
     }
+  }
+
+  /**
+   * A trip may only be linked to a customer the client owns (CUS-07.1). No-op when
+   * no customer is being set; throws 400 INVALID_CUSTOMER otherwise.
+   */
+  private async assertOwnedCustomer(
+    clientId: string,
+    customerId?: string | null,
+  ) {
+    if (!customerId) return;
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, clientId },
+    });
+    if (!customer) throw new BadRequestException('INVALID_CUSTOMER');
   }
 
   private async resolveActor(
@@ -646,6 +671,10 @@ export class TripsService {
         : null,
       driverId: t.driverId,
       driverName: t.driverName,
+      customerId: t.customerId,
+      customer: t.customer
+        ? { id: t.customer.id, name: t.customer.name }
+        : null,
       origin: t.origin,
       originCoords:
         t.originLat != null && t.originLng != null
