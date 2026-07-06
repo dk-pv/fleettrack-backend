@@ -21,6 +21,11 @@ import { UpdateTripDto } from './dto/update-trip.dto';
 import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
 
+/** Express request with the JWT-authenticated user attached by the guards. */
+interface AuthedRequest extends Request {
+  user: { userId: string; role: string; accountType?: string };
+}
+
 /**
  * Trip Management API.
  *
@@ -74,6 +79,12 @@ export class TripsController {
   @Get(':id/eta')
   eta(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getEta((req as any).user, id);
+  }
+
+  @Roles('ADMIN', 'CLIENT')
+  @Get(':id/eta/stops')
+  stopEtas(@Req() req: AuthedRequest, @Param('id') id: string) {
+    return this.tripsService.getStopEtas(req.user, id);
   }
 
   @Roles('ADMIN', 'CLIENT')

@@ -11,7 +11,11 @@ import { CreateTripDto } from './dto/create-trip.dto';
 import { UpdateTripDto } from './dto/update-trip.dto';
 import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
-import { computeRouteProgress, GeoPoint } from './trip-progress.util';
+import {
+  computeRouteProgress,
+  routeTotalDistance,
+  GeoPoint,
+} from './trip-progress.util';
 import { computeEta } from './trip-eta.util';
 import { GeocodingService } from '../geocoding/geocoding.service';
 
@@ -213,6 +217,80 @@ export class TripsService {
           }
         : null,
     };
+  }
+
+  /**
+   * Per-stop arrival prediction (ETA-03.1). Reuses the destination-ETA machinery:
+   * the route-progress `coveredMeters` and the same `computeEta` engine, applying
+   * the identical ETA_ACTIVE_STATUSES + live-position guards as getEta. For each
+   * remaining stop it derives distance-still-to-cover along the same route polyline
+   * (cumulative-to-stop − covered) and predicts an ETA. Passed/completed stops
+   * (covered ≥ cumulative) are skipped; order follows the stop sequence.
+   */
+  async getStopEtas(user: AuthUser, id: string) {
+    const trip = await this.prisma.trip.findUnique({
+      where: { id },
+      include: {
+        vehicle: { select: { latitude: true, longitude: true, speed: true } },
+        stops: { orderBy: { sequence: 'asc' } },
+      },
+    });
+
+    if (!trip) throw new NotFoundException('Trip not found');
+    this.assertReadable(user, trip.clientId);
+
+    const position = this.vehiclePosition(trip.vehicle);
+    const progress = computeRouteProgress(this.routePoints(trip), position);
+    const hasVehiclePosition = position !== null;
+
+    const canEstimate =
+      ETA_ACTIVE_STATUSES.includes(trip.status) && hasVehiclePosition;
+
+    if (!canEstimate) {
+      return { success: true, stops: [] };
+    }
+
+    const now = new Date();
+    const covered = progress.coveredMeters;
+
+    // Walk the same origin → stops polyline routePoints() builds (coordless nodes
+    // skipped), accumulating cumulative distance so each stop's remaining distance
+    // is measured consistently with `covered`.
+    const prefix: GeoPoint[] =
+      trip.originLat != null && trip.originLng != null
+        ? [{ lat: trip.originLat, lng: trip.originLng }]
+        : [];
+
+    const stops: Array<{
+      stopId: string;
+      sequence: number;
+      address: string;
+      remainingMeters: number;
+      etaTimestamp: string;
+      etaSeconds: number;
+      basisSpeedKmh: number;
+    }> = [];
+
+    for (const stop of trip.stops) {
+      if (stop.lat == null || stop.lng == null) continue; // no coords → can't predict
+
+      prefix.push({ lat: stop.lat, lng: stop.lng });
+      const remainingToStop = routeTotalDistance(prefix) - covered;
+      if (remainingToStop <= 0) continue; // passed / completed stop
+
+      const eta = computeEta(remainingToStop, trip.vehicle?.speed, now);
+      stops.push({
+        stopId: stop.id,
+        sequence: stop.sequence,
+        address: stop.address,
+        remainingMeters: remainingToStop,
+        etaTimestamp: eta.etaTimestamp,
+        etaSeconds: eta.etaSeconds,
+        basisSpeedKmh: eta.basisSpeedKmh,
+      });
+    }
+
+    return { success: true, stops };
   }
 
   /**
