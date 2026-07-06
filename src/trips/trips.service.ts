@@ -12,6 +12,7 @@ import { UpdateTripDto } from './dto/update-trip.dto';
 import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
 import { computeRouteProgress, GeoPoint } from './trip-progress.util';
+import { computeEta } from './trip-eta.util';
 import { GeocodingService } from '../geocoding/geocoding.service';
 
 type AuthUser = { userId: string; role: string; accountType?: string };
@@ -43,6 +44,13 @@ const TRANSITIONS: Record<TripStatus, TripStatus[]> = {
 const STOP_EDITABLE_STATUSES: TripStatus[] = [
   TripStatus.PLANNED,
   TripStatus.ASSIGNED,
+];
+
+/** Statuses for which a destination ETA is meaningful (trip in transit — ETA-01). */
+const ETA_ACTIVE_STATUSES: TripStatus[] = [
+  TripStatus.STARTED,
+  TripStatus.ONGOING,
+  TripStatus.DELAYED,
 ];
 
 const tripInclude = {
@@ -159,6 +167,51 @@ export class TripsService {
           progress.deviationMeters > ROUTE_DEVIATION_THRESHOLD_M,
       },
       vehiclePosition: position,
+    };
+  }
+
+  /**
+   * Destination ETA (ETA-01.1 / ETA-01.2). Fully derived: reuses the route-progress
+   * `remainingMeters` and the assigned vehicle's live speed (falling back to an
+   * average) — no Maps travel time, no external calls. ETA is null unless the trip
+   * is in transit, has a live position, and has distance remaining.
+   */
+  async getEta(user: AuthUser, id: string) {
+    const trip = await this.prisma.trip.findUnique({
+      where: { id },
+      include: {
+        vehicle: { select: { latitude: true, longitude: true, speed: true } },
+        stops: { orderBy: { sequence: 'asc' } },
+      },
+    });
+
+    if (!trip) throw new NotFoundException('Trip not found');
+    this.assertReadable(user, trip.clientId);
+
+    const position = this.vehiclePosition(trip.vehicle);
+    const progress = computeRouteProgress(this.routePoints(trip), position);
+    const hasVehiclePosition = position !== null;
+
+    const canEstimate =
+      ETA_ACTIVE_STATUSES.includes(trip.status) &&
+      hasVehiclePosition &&
+      progress.remainingMeters > 0;
+
+    const eta = canEstimate
+      ? computeEta(progress.remainingMeters, trip.vehicle?.speed, new Date())
+      : null;
+
+    return {
+      success: true,
+      eta: eta
+        ? {
+            etaTimestamp: eta.etaTimestamp,
+            etaSeconds: eta.etaSeconds,
+            basisSpeedKmh: eta.basisSpeedKmh,
+            remainingMeters: progress.remainingMeters,
+            hasVehiclePosition,
+          }
+        : null,
     };
   }
 

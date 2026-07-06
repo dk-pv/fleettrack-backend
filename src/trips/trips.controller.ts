@@ -71,6 +71,12 @@ export class TripsController {
   }
 
   @Roles('ADMIN', 'CLIENT')
+  @Get(':id/eta')
+  eta(@Req() req: Request, @Param('id') id: string) {
+    return this.tripsService.getEta((req as any).user, id);
+  }
+
+  @Roles('ADMIN', 'CLIENT')
   @Get(':id/breadcrumbs')
   breadcrumbs(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getBreadcrumbs((req as any).user, id);
