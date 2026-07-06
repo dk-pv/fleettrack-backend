@@ -88,6 +88,12 @@ export class TripsController {
   }
 
   @Roles('ADMIN', 'CLIENT')
+  @Get(':id/delay')
+  delay(@Req() req: AuthedRequest, @Param('id') id: string) {
+    return this.tripsService.getDelay(req.user, id);
+  }
+
+  @Roles('ADMIN', 'CLIENT')
   @Get(':id/breadcrumbs')
   breadcrumbs(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getBreadcrumbs((req as any).user, id);

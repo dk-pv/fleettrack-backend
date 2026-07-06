@@ -17,6 +17,7 @@ import {
   GeoPoint,
 } from './trip-progress.util';
 import { computeEta } from './trip-eta.util';
+import { detectDelay, DEFAULT_DELAY_MARGIN_MINUTES } from './trip-delay.util';
 import { GeocodingService } from '../geocoding/geocoding.service';
 
 type AuthUser = { userId: string; role: string; accountType?: string };
@@ -291,6 +292,56 @@ export class TripsService {
     }
 
     return { success: true, stops };
+  }
+
+  /**
+   * Delay detection (ETA-05.1) — read-only. A trip is flagged delayed when its
+   * reference arrival runs past `scheduledEnd` by more than the margin:
+   *  - active trip  → predicted ETA (reuses getEta; falls back to now when no live
+   *                   position is available);
+   *  - not active but not terminal → the current time;
+   *  - COMPLETED / CANCELLED       → never flagged.
+   * No status change, no events, no notifications.
+   */
+  async getDelay(user: AuthUser, id: string) {
+    const trip = await this.prisma.trip.findUnique({ where: { id } });
+    if (!trip) throw new NotFoundException('Trip not found');
+    this.assertReadable(user, trip.clientId);
+
+    const marginMinutes = DEFAULT_DELAY_MARGIN_MINUTES;
+
+    // Terminal trips are never flagged.
+    if (
+      trip.status === TripStatus.COMPLETED ||
+      trip.status === TripStatus.CANCELLED
+    ) {
+      const scheduledEnd = trip.scheduledEnd.toISOString();
+      return {
+        success: true,
+        delay: {
+          isDelayed: false,
+          delayMinutes: 0,
+          marginMinutes,
+          scheduledEnd,
+          referenceArrival: scheduledEnd,
+        },
+      };
+    }
+
+    let referenceArrival: Date;
+    if (ETA_ACTIVE_STATUSES.includes(trip.status)) {
+      // Reuse the ETA endpoint's prediction (no duplicated ETA logic).
+      const { eta } = await this.getEta(user, id);
+      referenceArrival = eta ? new Date(eta.etaTimestamp) : new Date();
+    } else {
+      // Not active, not terminal (PLANNED / ASSIGNED) → compare current time.
+      referenceArrival = new Date();
+    }
+
+    return {
+      success: true,
+      delay: detectDelay(trip.scheduledEnd, referenceArrival, marginMinutes),
+    };
   }
 
   /**
