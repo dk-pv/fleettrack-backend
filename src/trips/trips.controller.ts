@@ -20,6 +20,7 @@ import { CreateTripDto } from './dto/create-trip.dto';
 import { UpdateTripDto } from './dto/update-trip.dto';
 import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
+import { EtaAlertsQueryDto } from './dto/eta-alerts-query.dto';
 
 /** Express request with the JWT-authenticated user attached by the guards. */
 interface AuthedRequest extends Request {
@@ -91,6 +92,16 @@ export class TripsController {
   @Get(':id/delay')
   delay(@Req() req: AuthedRequest, @Param('id') id: string) {
     return this.tripsService.getDelay(req.user, id);
+  }
+
+  @Roles('ADMIN', 'CLIENT')
+  @Get(':id/eta/alerts')
+  etaAlerts(
+    @Req() req: AuthedRequest,
+    @Param('id') id: string,
+    @Query() query: EtaAlertsQueryDto,
+  ) {
+    return this.tripsService.getEtaAlerts(req.user, id, query);
   }
 
   @Roles('ADMIN', 'CLIENT')

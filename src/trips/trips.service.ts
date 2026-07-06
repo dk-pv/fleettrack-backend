@@ -18,6 +18,12 @@ import {
 } from './trip-progress.util';
 import { computeEta } from './trip-eta.util';
 import { detectDelay, DEFAULT_DELAY_MARGIN_MINUTES } from './trip-delay.util';
+import {
+  buildDelayAlert,
+  buildEtaShiftAlert,
+  EtaAlert,
+} from './trip-eta-alert.util';
+import { EtaAlertsQueryDto } from './dto/eta-alerts-query.dto';
 import { GeocodingService } from '../geocoding/geocoding.service';
 
 type AuthUser = { userId: string; role: string; accountType?: string };
@@ -341,6 +347,45 @@ export class TripsService {
     return {
       success: true,
       delay: detectDelay(trip.scheduledEnd, referenceArrival, marginMinutes),
+    };
+  }
+
+  /**
+   * ETA alerts (ETA-06.1) — read-only detection foundation. Composes the existing
+   * ETA-05.1 delay signal and the ETA engine into raisable alerts: a DELAY alert
+   * when the trip runs past schedule, and (when a `baselineEtaTimestamp` is given)
+   * an ETA_SHIFT alert when the live ETA has drifted significantly from it. No
+   * status change, no persistence, no notification dispatch — delivering these to
+   * users is the Notification module's job (not yet built). Access is enforced by
+   * the reused getDelay/getEta.
+   */
+  async getEtaAlerts(user: AuthUser, id: string, query: EtaAlertsQueryDto) {
+    const alerts: EtaAlert[] = [];
+
+    // DELAY — reuse ETA-05.1 delay detection verbatim (also enforces read access).
+    const { delay } = await this.getDelay(user, id);
+    const delayAlert = buildDelayAlert(delay);
+    if (delayAlert) alerts.push(delayAlert);
+
+    // ETA_SHIFT — only when the caller supplies a baseline to compare against.
+    let baselineEtaTimestamp: string | null = null;
+    if (query.baselineEtaTimestamp) {
+      baselineEtaTimestamp = query.baselineEtaTimestamp;
+      const { eta } = await this.getEta(user, id);
+      if (eta) {
+        const shiftAlert = buildEtaShiftAlert(
+          new Date(query.baselineEtaTimestamp),
+          new Date(eta.etaTimestamp),
+        );
+        if (shiftAlert) alerts.push(shiftAlert);
+      }
+    }
+
+    return {
+      success: true,
+      isDelayed: delay.isDelayed,
+      baselineEtaTimestamp,
+      alerts,
     };
   }
 

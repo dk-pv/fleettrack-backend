@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -14,6 +15,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { CreateDelayDto } from './dto/create-delay.dto';
+import { DelayStatsQueryDto } from './dto/delay-stats-query.dto';
 
 /** Express request with the JWT-authenticated user attached by the guards. */
 interface AuthedRequest extends Request {
@@ -40,6 +42,13 @@ export class DelaysController {
   @Get()
   findAll(@Req() req: AuthedRequest) {
     return this.delaysService.findAll(req.user);
+  }
+
+  /** Delay aggregation by category/driver/route/period (DLY-04.1). */
+  @Roles('ADMIN', 'CLIENT')
+  @Get('stats')
+  getStats(@Req() req: AuthedRequest, @Query() query: DelayStatsQueryDto) {
+    return this.delaysService.getStats(req.user, query);
   }
 }
 

@@ -6,8 +6,24 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDelayDto } from './dto/create-delay.dto';
+import { DelayStatsQueryDto } from './dto/delay-stats-query.dto';
 
 type AuthUser = { userId: string; role: string; accountType?: string };
+
+type Granularity = 'day' | 'week' | 'month';
+
+/** One aggregation bucket (per category / driver / route / period). */
+export interface StatBucket {
+  key: string;
+  label: string;
+  count: number;
+  totalMinutes: number;
+}
+
+/** Enum value (e.g. TRAFFIC) → display label (Traffic). */
+function titleCase(value: string): string {
+  return value.charAt(0) + value.slice(1).toLowerCase();
+}
 
 /**
  * Reported-delay ingest/serve (DLY-01.1). A delay always belongs to a trip, so
@@ -77,5 +93,111 @@ export class DelaysService {
     });
 
     return { success: true, delays };
+  }
+
+  /**
+   * Aggregate reported delays by category, driver, route and reporting period
+   * (DLY-04.1). Read-only; derived entirely from the existing Delay + Trip data
+   * with the same role scoping as `findAll` (ADMIN all, CLIENT own trips) plus an
+   * optional `reportedAt` range. A single scoped `findMany` is reduced in memory,
+   * because Prisma `groupBy` cannot traverse the trip relation (driver/route) nor
+   * date-truncate the period.
+   */
+  async getStats(user: AuthUser, query: DelayStatsQueryDto) {
+    const period: Granularity = query.period ?? 'month';
+
+    const reportedAt: Prisma.DateTimeFilter = {};
+    if (query.from) reportedAt.gte = new Date(query.from);
+    if (query.to) reportedAt.lte = new Date(query.to);
+
+    const where: Prisma.DelayWhereInput = {
+      ...(user.role === 'CLIENT' ? { trip: { clientId: user.userId } } : {}),
+      ...(query.from || query.to ? { reportedAt } : {}),
+    };
+
+    const delays = await this.prisma.delay.findMany({
+      where,
+      select: {
+        category: true,
+        durationMinutes: true,
+        reportedAt: true,
+        trip: {
+          select: {
+            driverId: true,
+            driverName: true,
+            origin: true,
+            destination: true,
+          },
+        },
+      },
+    });
+
+    const byCategory = new Map<string, StatBucket>();
+    const byDriver = new Map<string, StatBucket>();
+    const byRoute = new Map<string, StatBucket>();
+    const byPeriod = new Map<string, StatBucket>();
+    let count = 0;
+    let totalMinutes = 0;
+
+    for (const delay of delays) {
+      const minutes = delay.durationMinutes ?? 0;
+      count += 1;
+      totalMinutes += minutes;
+
+      this.bump(byCategory, delay.category, titleCase(delay.category), minutes);
+
+      const driverKey = delay.trip.driverId ?? 'UNASSIGNED';
+      const driverLabel =
+        delay.trip.driverName ?? delay.trip.driverId ?? 'Unassigned';
+      this.bump(byDriver, driverKey, driverLabel, minutes);
+
+      const routeKey = `${delay.trip.origin} → ${delay.trip.destination}`;
+      this.bump(byRoute, routeKey, routeKey, minutes);
+
+      const periodKey = this.periodKey(delay.reportedAt, period);
+      this.bump(byPeriod, periodKey, periodKey, minutes);
+    }
+
+    const byCount = (a: StatBucket, b: StatBucket) => b.count - a.count;
+    const byKeyAsc = (a: StatBucket, b: StatBucket) =>
+      a.key.localeCompare(b.key);
+
+    return {
+      success: true,
+      range: { from: query.from ?? null, to: query.to ?? null, period },
+      total: { count, totalMinutes },
+      byCategory: [...byCategory.values()].sort(byCount),
+      byDriver: [...byDriver.values()].sort(byCount),
+      byRoute: [...byRoute.values()].sort(byCount),
+      byPeriod: [...byPeriod.values()].sort(byKeyAsc),
+    };
+  }
+
+  /** Accumulate one delay into an aggregation bucket keyed by `key`. */
+  private bump(
+    map: Map<string, StatBucket>,
+    key: string,
+    label: string,
+    minutes: number,
+  ): void {
+    const bucket = map.get(key) ?? { key, label, count: 0, totalMinutes: 0 };
+    bucket.count += 1;
+    bucket.totalMinutes += minutes;
+    map.set(key, bucket);
+  }
+
+  /** Chronological bucket key for a report timestamp at the requested granularity. */
+  private periodKey(date: Date, period: Granularity): string {
+    const iso = date.toISOString();
+    if (period === 'day') return iso.slice(0, 10); // YYYY-MM-DD
+    if (period === 'month') return iso.slice(0, 7); // YYYY-MM
+
+    // week → the Monday of that ISO week (UTC), an unambiguous sortable key.
+    const monday = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+    );
+    const weekday = monday.getUTCDay(); // 0 = Sunday
+    monday.setUTCDate(monday.getUTCDate() + (weekday === 0 ? -6 : 1 - weekday));
+    return monday.toISOString().slice(0, 10);
   }
 }
