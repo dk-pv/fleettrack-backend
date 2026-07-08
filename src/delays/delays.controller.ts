@@ -6,9 +6,10 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 
 import { DelaysService } from './delays.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -49,6 +50,23 @@ export class DelaysController {
   @Get('stats')
   getStats(@Req() req: AuthedRequest, @Query() query: DelayStatsQueryDto) {
     return this.delaysService.getStats(req.user, query);
+  }
+
+  /** Delay analysis report as a PDF (RPT-04.2) — reuses the getStats aggregation. */
+  @Roles('ADMIN', 'CLIENT')
+  @Get('stats/export')
+  async exportStats(
+    @Req() req: AuthedRequest,
+    @Query() query: DelayStatsQueryDto,
+    @Res() res: Response,
+  ) {
+    const pdf = await this.delaysService.generateStatsPdf(req.user, query);
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'attachment; filename=delay-analysis-report.pdf',
+    });
+    res.send(pdf);
   }
 }
 

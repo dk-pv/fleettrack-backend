@@ -69,4 +69,17 @@ export class DashboardController {
 
     return this.dashboardService.getTripSummary(filterClientId);
   }
+
+  /** Delivery performance metrics for the dashboard (DSH-04.1). */
+  @UseGuards(JwtAuthGuard)
+  @Get('delivery-metrics')
+  async getDeliveryMetrics(
+    @Req() req: AuthedRequest,
+    @Query('clientId') clientId?: string,
+  ) {
+    const filterClientId =
+      req.user.role === 'CLIENT' ? req.user.userId : clientId;
+
+    return this.dashboardService.getDeliveryMetrics(filterClientId);
+  }
 }

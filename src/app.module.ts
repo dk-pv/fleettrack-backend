@@ -11,6 +11,10 @@ import { TripsModule } from './trips/trips.module';
 import { GeocodingModule } from './geocoding/geocoding.module';
 import { CustomersModule } from './customers/customers.module';
 import { DelaysModule } from './delays/delays.module';
+import { TripCostModule } from './trip-cost/trip-cost.module';
+import { UploadModule } from './upload/upload.module';
+import { PodModule } from './pod/pod.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -26,6 +30,10 @@ import { DelaysModule } from './delays/delays.module';
     GeocodingModule,
     CustomersModule,
     DelaysModule,
+    TripCostModule,
+    UploadModule,
+    PodModule,
+    NotificationsModule,
   ],
 })
 export class AppModule {}

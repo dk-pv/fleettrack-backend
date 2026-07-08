@@ -6,8 +6,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, TripEventAction, TripStatus } from '@prisma/client';
+import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTripDto } from './dto/create-trip.dto';
+import { TripReportQueryDto } from './dto/trip-report-query.dto';
+import { DriverReportQueryDto } from './dto/driver-report-query.dto';
+import { VehicleReportQueryDto } from './dto/vehicle-report-query.dto';
 import { UpdateTripDto } from './dto/update-trip.dto';
 import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
@@ -25,8 +29,41 @@ import {
 } from './trip-eta-alert.util';
 import { EtaAlertsQueryDto } from './dto/eta-alerts-query.dto';
 import { GeocodingService } from '../geocoding/geocoding.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type AuthUser = { userId: string; role: string; accountType?: string };
+
+/** In-memory per-driver tally used to build the driver performance report (RPT-02.1). */
+interface DriverPerfAccumulator {
+  driverId: string;
+  driverName: string | null;
+  totalTrips: number;
+  completed: number;
+  active: number;
+  cancelled: number;
+  onTime: number;
+  delayed: number;
+  totalDistanceKm: number;
+  durationSum: number; // actual elapsed minutes over completed trips with both stamps
+  durationCount: number;
+}
+
+/** In-memory per-vehicle tally used to build the vehicle utilization report (RPT-03.1). */
+interface VehiclePerfAccumulator {
+  vehicleId: string;
+  vehicleNumber: string | null;
+  vehicleName: string | null;
+  totalTrips: number;
+  completed: number;
+  active: number;
+  cancelled: number;
+  onTime: number;
+  delayed: number;
+  totalDistanceKm: number;
+  durationSum: number; // actual elapsed minutes over completed trips with both stamps
+  durationCount: number;
+  engagedMinutes: number; // busy time counted toward utilization
+}
 
 const ROUTE_DEVIATION_THRESHOLD_M = 2000;
 
@@ -76,6 +113,7 @@ export class TripsService {
   constructor(
     private prisma: PrismaService,
     private geocoding: GeocodingService,
+    private notifications: NotificationsService,
   ) {}
 
   /* ---------------------------------------------------------------- */
@@ -390,6 +428,599 @@ export class TripsService {
   }
 
   /**
+   * Trip summary report data (RPT-01.1) — counts by status + per-trip rows over a
+   * date range, scoped like findAll (CLIENT own trips, ADMIN all or by clientId).
+   * One narrow findMany; the status breakdown is derived in memory (no extra query).
+   * Shared by the JSON view and the PDF export.
+   */
+  private async buildTripSummary(user: AuthUser, query: TripReportQueryDto) {
+    const scheduledStart: Prisma.DateTimeFilter = {};
+    if (query.from) scheduledStart.gte = new Date(query.from);
+    if (query.to) scheduledStart.lte = new Date(query.to);
+
+    const where: Prisma.TripWhereInput = {
+      ...(user.role === 'CLIENT'
+        ? { clientId: user.userId }
+        : query.clientId
+          ? { clientId: query.clientId }
+          : {}),
+      ...(query.from || query.to ? { scheduledStart } : {}),
+    };
+
+    const trips = await this.prisma.trip.findMany({
+      where,
+      select: {
+        id: true,
+        reference: true,
+        origin: true,
+        destination: true,
+        status: true,
+        scheduledStart: true,
+        driverName: true,
+        vehicle: { select: { vehicleNumber: true } },
+      },
+      orderBy: { scheduledStart: 'desc' },
+    });
+
+    const statuses: TripStatus[] = [
+      TripStatus.PLANNED,
+      TripStatus.ASSIGNED,
+      TripStatus.STARTED,
+      TripStatus.ONGOING,
+      TripStatus.DELAYED,
+      TripStatus.COMPLETED,
+      TripStatus.CANCELLED,
+    ];
+    const byStatus = statuses.map((status) => ({
+      status,
+      count: trips.filter((trip) => trip.status === status).length,
+    }));
+
+    const rows = trips.map((trip) => ({
+      tripId: trip.id,
+      reference: trip.reference,
+      origin: trip.origin,
+      destination: trip.destination,
+      status: trip.status,
+      scheduledStart: trip.scheduledStart.toISOString(),
+      vehicleNumber: trip.vehicle?.vehicleNumber ?? null,
+      driverName: trip.driverName ?? null,
+    }));
+
+    return {
+      range: { from: query.from ?? null, to: query.to ?? null },
+      total: trips.length,
+      byStatus,
+      rows,
+    };
+  }
+
+  /** Trip summary report as JSON for the report view (RPT-01.1). */
+  async getSummaryReport(user: AuthUser, query: TripReportQueryDto) {
+    const report = await this.buildTripSummary(user, query);
+    return { success: true, ...report };
+  }
+
+  /**
+   * Trip summary report as a PDF (RPT-01.2 export). Reuses buildTripSummary for the
+   * data and the same pdfkit-to-Buffer approach as the vehicle/cost reports — no
+   * duplicated report query, no duplicated PDF generation.
+   */
+  async generateSummaryPdf(
+    user: AuthUser,
+    query: TripReportQueryDto,
+  ): Promise<Buffer> {
+    const { range, total, byStatus, rows } = await this.buildTripSummary(
+      user,
+      query,
+    );
+
+    const doc = new PDFDocument({ margin: 50 });
+    const buffers: Uint8Array[] = [];
+    doc.on('data', (chunk: Buffer) => buffers.push(chunk));
+
+    return new Promise<Buffer>((resolve) => {
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+
+      doc.fontSize(20).text('Trip Summary Report', { align: 'center' });
+      doc.moveDown();
+
+      const period =
+        range.from || range.to
+          ? `${range.from ?? '…'} to ${range.to ?? '…'}`
+          : 'All time';
+      doc.fontSize(10).text(`Period: ${period}`);
+      doc.text(`Generated: ${new Date().toLocaleString()}`);
+      doc.text(`Total trips: ${total}`);
+      doc.moveDown();
+
+      doc.fontSize(13).text('By status');
+      for (const entry of byStatus) {
+        doc.fontSize(10).text(`${entry.status}: ${entry.count}`);
+      }
+      doc.moveDown();
+
+      doc.fontSize(13).text('Trips');
+      for (const row of rows) {
+        doc
+          .fontSize(9)
+          .text(
+            `${row.reference}  ${row.origin} -> ${row.destination}  [${row.status}]  ${row.vehicleNumber ?? '-'} / ${row.driverName ?? '-'}`,
+          );
+      }
+
+      doc.end();
+    });
+  }
+
+  /**
+   * Driver performance report data (RPT-02.1) — per-driver trip statistics over a
+   * date range, scoped like findAll (CLIENT own trips, ADMIN all or by clientId).
+   * One narrow findMany; every metric is derived in memory (no extra query, no N+1).
+   *
+   * Reuses the app-wide delay rule (ETA-05.1 detectDelay + DEFAULT_DELAY_MARGIN_
+   * MINUTES) for on-time vs late deliveries — the exact definition DSH-04 uses — and
+   * the same "active" bucket (STARTED/ONGOING/DELAYED) as the dashboard trip summary.
+   * Trips with no assigned driver are excluded from the per-driver breakdown.
+   */
+  private async buildDriverPerformance(
+    user: AuthUser,
+    query: DriverReportQueryDto,
+  ) {
+    const scheduledStart: Prisma.DateTimeFilter = {};
+    if (query.from) scheduledStart.gte = new Date(query.from);
+    if (query.to) scheduledStart.lte = new Date(query.to);
+
+    const where: Prisma.TripWhereInput = {
+      driverId: { not: null },
+      ...(user.role === 'CLIENT'
+        ? { clientId: user.userId }
+        : query.clientId
+          ? { clientId: query.clientId }
+          : {}),
+      ...(query.from || query.to ? { scheduledStart } : {}),
+    };
+
+    const trips = await this.prisma.trip.findMany({
+      where,
+      select: {
+        driverId: true,
+        driverName: true,
+        status: true,
+        distanceKm: true,
+        scheduledEnd: true,
+        startedAt: true,
+        completedAt: true,
+      },
+      orderBy: { scheduledStart: 'desc' },
+    });
+
+    const activeStatuses: TripStatus[] = [
+      TripStatus.STARTED,
+      TripStatus.ONGOING,
+      TripStatus.DELAYED,
+    ];
+
+    // Aggregate per driver (keyed by driverId; the where filter guarantees non-null).
+    const byDriver = new Map<string, DriverPerfAccumulator>();
+    for (const trip of trips) {
+      if (!trip.driverId) continue;
+      let acc = byDriver.get(trip.driverId);
+      if (!acc) {
+        acc = {
+          driverId: trip.driverId,
+          driverName: trip.driverName ?? null,
+          totalTrips: 0,
+          completed: 0,
+          active: 0,
+          cancelled: 0,
+          onTime: 0,
+          delayed: 0,
+          totalDistanceKm: 0,
+          durationSum: 0,
+          durationCount: 0,
+        };
+        byDriver.set(trip.driverId, acc);
+      }
+      if (!acc.driverName && trip.driverName) acc.driverName = trip.driverName;
+
+      acc.totalTrips += 1;
+      acc.totalDistanceKm += trip.distanceKm;
+
+      if (trip.status === TripStatus.COMPLETED) {
+        acc.completed += 1;
+        // completedAt is stamped on the COMPLETED transition; fall back defensively.
+        const arrival = trip.completedAt ?? trip.scheduledEnd;
+        if (
+          detectDelay(trip.scheduledEnd, arrival, DEFAULT_DELAY_MARGIN_MINUTES)
+            .isDelayed
+        ) {
+          acc.delayed += 1;
+        } else {
+          acc.onTime += 1;
+        }
+        if (trip.startedAt && trip.completedAt) {
+          const mins = Math.round(
+            (trip.completedAt.getTime() - trip.startedAt.getTime()) / 60000,
+          );
+          if (mins >= 0) {
+            acc.durationSum += mins;
+            acc.durationCount += 1;
+          }
+        }
+      } else if (activeStatuses.includes(trip.status)) {
+        acc.active += 1;
+      } else if (trip.status === TripStatus.CANCELLED) {
+        acc.cancelled += 1;
+      }
+    }
+
+    const pct = (part: number, whole: number) =>
+      whole === 0 ? 0 : Math.round((part / whole) * 1000) / 10;
+    const round1 = (n: number) => Math.round(n * 10) / 10;
+
+    const rows = [...byDriver.values()]
+      .map((a) => ({
+        driverId: a.driverId,
+        driverName: a.driverName,
+        totalTrips: a.totalTrips,
+        completed: a.completed,
+        active: a.active,
+        cancelled: a.cancelled,
+        onTime: a.onTime,
+        delayed: a.delayed,
+        completionRate: pct(a.completed, a.totalTrips),
+        onTimeRate: pct(a.onTime, a.completed),
+        totalDistanceKm: round1(a.totalDistanceKm),
+        avgDurationMins:
+          a.durationCount === 0
+            ? 0
+            : Math.round(a.durationSum / a.durationCount),
+      }))
+      .sort((x, y) => y.totalTrips - x.totalTrips);
+
+    const totals = rows.reduce(
+      (t, r) => ({
+        drivers: t.drivers + 1,
+        trips: t.trips + r.totalTrips,
+        completed: t.completed + r.completed,
+        active: t.active + r.active,
+        cancelled: t.cancelled + r.cancelled,
+        onTime: t.onTime + r.onTime,
+        delayed: t.delayed + r.delayed,
+        totalDistanceKm: round1(t.totalDistanceKm + r.totalDistanceKm),
+      }),
+      {
+        drivers: 0,
+        trips: 0,
+        completed: 0,
+        active: 0,
+        cancelled: 0,
+        onTime: 0,
+        delayed: 0,
+        totalDistanceKm: 0,
+      },
+    );
+
+    return {
+      range: { from: query.from ?? null, to: query.to ?? null },
+      totals,
+      rows,
+    };
+  }
+
+  /** Driver performance report as JSON for the report view (RPT-02.1). */
+  async getDriverReport(user: AuthUser, query: DriverReportQueryDto) {
+    const report = await this.buildDriverPerformance(user, query);
+    return { success: true, ...report };
+  }
+
+  /**
+   * Driver performance report as a PDF (RPT-02.3 export). Reuses buildDriverPerformance
+   * for the data and the same pdfkit-to-Buffer approach as the trip/cost reports — no
+   * duplicated report query, no duplicated PDF generation.
+   */
+  async generateDriverPdf(
+    user: AuthUser,
+    query: DriverReportQueryDto,
+  ): Promise<Buffer> {
+    const { range, totals, rows } = await this.buildDriverPerformance(
+      user,
+      query,
+    );
+
+    const doc = new PDFDocument({ margin: 50 });
+    const buffers: Uint8Array[] = [];
+    doc.on('data', (chunk: Buffer) => buffers.push(chunk));
+
+    return new Promise<Buffer>((resolve) => {
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+
+      doc.fontSize(20).text('Driver Performance Report', { align: 'center' });
+      doc.moveDown();
+
+      const period =
+        range.from || range.to
+          ? `${range.from ?? '…'} to ${range.to ?? '…'}`
+          : 'All time';
+      doc.fontSize(10).text(`Period: ${period}`);
+      doc.text(`Generated: ${new Date().toLocaleString()}`);
+      doc.text(
+        `Drivers: ${totals.drivers}  Trips: ${totals.trips}  Completed: ${totals.completed}  On-time: ${totals.onTime}  Late: ${totals.delayed}`,
+      );
+      doc.moveDown();
+
+      doc.fontSize(13).text('By driver');
+      for (const row of rows) {
+        doc
+          .fontSize(9)
+          .text(
+            `${row.driverName ?? row.driverId}: ${row.totalTrips} trips, ${row.completed} completed (${row.completionRate}%), ${row.onTime} on-time (${row.onTimeRate}%), ${row.delayed} late, ${row.totalDistanceKm} km, avg ${row.avgDurationMins} min`,
+          );
+      }
+
+      doc.end();
+    });
+  }
+
+  /**
+   * Vehicle utilization report data (RPT-03.1) — per-vehicle trip statistics over a
+   * date range, scoped like findAll (CLIENT own trips, ADMIN all or by clientId). One
+   * narrow findMany; every metric is derived in memory (no extra query, no N+1). Reuses
+   * the driver-report aggregation pattern (RPT-02) and the same delay/active definitions
+   * (ETA-05.1 detectDelay, DSH-04 on-time rule, DSH "active" bucket).
+   *
+   * Utilization is time-based: each vehicle's busy time (completed → actual elapsed
+   * completedAt−startedAt, falling back to the scheduled window; active → scheduled
+   * window; cancelled/upcoming → none) as a share of the reporting window. The window
+   * is the requested from→to, or the observed scheduledStart→scheduledEnd span across
+   * all in-scope trips when a bound is omitted — one shared denominator so vehicles are
+   * comparable. Unlike driverName, vehicleNumber/vehicleName live on the Vehicle
+   * relation (not the Trip), so they are included for the label. Trips with no assigned
+   * vehicle are excluded.
+   */
+  private async buildVehicleUtilization(
+    user: AuthUser,
+    query: VehicleReportQueryDto,
+  ) {
+    const scheduledStart: Prisma.DateTimeFilter = {};
+    if (query.from) scheduledStart.gte = new Date(query.from);
+    if (query.to) scheduledStart.lte = new Date(query.to);
+
+    const where: Prisma.TripWhereInput = {
+      vehicleId: { not: null },
+      ...(user.role === 'CLIENT'
+        ? { clientId: user.userId }
+        : query.clientId
+          ? { clientId: query.clientId }
+          : {}),
+      ...(query.from || query.to ? { scheduledStart } : {}),
+    };
+
+    const trips = await this.prisma.trip.findMany({
+      where,
+      select: {
+        vehicleId: true,
+        vehicle: { select: { vehicleNumber: true, vehicleName: true } },
+        status: true,
+        distanceKm: true,
+        scheduledStart: true,
+        scheduledEnd: true,
+        startedAt: true,
+        completedAt: true,
+      },
+      orderBy: { scheduledStart: 'desc' },
+    });
+
+    const activeStatuses: TripStatus[] = [
+      TripStatus.STARTED,
+      TripStatus.ONGOING,
+      TripStatus.DELAYED,
+    ];
+
+    // Shared utilization window: requested bounds, else the observed trip span.
+    let observedStart = Number.POSITIVE_INFINITY;
+    let observedEnd = Number.NEGATIVE_INFINITY;
+    for (const trip of trips) {
+      observedStart = Math.min(observedStart, trip.scheduledStart.getTime());
+      observedEnd = Math.max(observedEnd, trip.scheduledEnd.getTime());
+    }
+    const windowStart = query.from
+      ? new Date(query.from).getTime()
+      : observedStart;
+    const windowEnd = query.to ? new Date(query.to).getTime() : observedEnd;
+    const windowMinutes =
+      Number.isFinite(windowStart) && Number.isFinite(windowEnd)
+        ? Math.max(0, Math.round((windowEnd - windowStart) / 60000))
+        : 0;
+
+    // Aggregate per vehicle (keyed by vehicleId; the where filter guarantees non-null).
+    const byVehicle = new Map<string, VehiclePerfAccumulator>();
+    for (const trip of trips) {
+      if (!trip.vehicleId) continue;
+      let acc = byVehicle.get(trip.vehicleId);
+      if (!acc) {
+        acc = {
+          vehicleId: trip.vehicleId,
+          vehicleNumber: trip.vehicle?.vehicleNumber ?? null,
+          vehicleName: trip.vehicle?.vehicleName ?? null,
+          totalTrips: 0,
+          completed: 0,
+          active: 0,
+          cancelled: 0,
+          onTime: 0,
+          delayed: 0,
+          totalDistanceKm: 0,
+          durationSum: 0,
+          durationCount: 0,
+          engagedMinutes: 0,
+        };
+        byVehicle.set(trip.vehicleId, acc);
+      }
+
+      acc.totalTrips += 1;
+      acc.totalDistanceKm += trip.distanceKm;
+
+      const scheduledMinutes = Math.max(
+        0,
+        Math.round(
+          (trip.scheduledEnd.getTime() - trip.scheduledStart.getTime()) / 60000,
+        ),
+      );
+
+      if (trip.status === TripStatus.COMPLETED) {
+        acc.completed += 1;
+        // completedAt is stamped on the COMPLETED transition; fall back defensively.
+        const arrival = trip.completedAt ?? trip.scheduledEnd;
+        if (
+          detectDelay(trip.scheduledEnd, arrival, DEFAULT_DELAY_MARGIN_MINUTES)
+            .isDelayed
+        ) {
+          acc.delayed += 1;
+        } else {
+          acc.onTime += 1;
+        }
+        if (trip.startedAt && trip.completedAt) {
+          const mins = Math.round(
+            (trip.completedAt.getTime() - trip.startedAt.getTime()) / 60000,
+          );
+          if (mins >= 0) {
+            acc.durationSum += mins;
+            acc.durationCount += 1;
+            acc.engagedMinutes += mins;
+          } else {
+            acc.engagedMinutes += scheduledMinutes;
+          }
+        } else {
+          acc.engagedMinutes += scheduledMinutes;
+        }
+      } else if (activeStatuses.includes(trip.status)) {
+        acc.active += 1;
+        acc.engagedMinutes += scheduledMinutes;
+      } else if (trip.status === TripStatus.CANCELLED) {
+        acc.cancelled += 1;
+      }
+    }
+
+    const pct = (part: number, whole: number) =>
+      whole === 0 ? 0 : Math.round((part / whole) * 1000) / 10;
+    const round1 = (n: number) => Math.round(n * 10) / 10;
+
+    const rows = [...byVehicle.values()]
+      .map((a) => ({
+        vehicleId: a.vehicleId,
+        vehicleNumber: a.vehicleNumber,
+        vehicleName: a.vehicleName,
+        totalTrips: a.totalTrips,
+        completed: a.completed,
+        active: a.active,
+        cancelled: a.cancelled,
+        onTime: a.onTime,
+        delayed: a.delayed,
+        completionRate: pct(a.completed, a.totalTrips),
+        onTimeRate: pct(a.onTime, a.completed),
+        utilizationPct:
+          windowMinutes === 0
+            ? 0
+            : Math.min(100, round1((a.engagedMinutes / windowMinutes) * 100)),
+        totalDistanceKm: round1(a.totalDistanceKm),
+        avgDurationMins:
+          a.durationCount === 0
+            ? 0
+            : Math.round(a.durationSum / a.durationCount),
+      }))
+      .sort((x, y) => y.utilizationPct - x.utilizationPct);
+
+    const totals = rows.reduce(
+      (t, r) => ({
+        vehicles: t.vehicles + 1,
+        trips: t.trips + r.totalTrips,
+        completed: t.completed + r.completed,
+        active: t.active + r.active,
+        cancelled: t.cancelled + r.cancelled,
+        onTime: t.onTime + r.onTime,
+        delayed: t.delayed + r.delayed,
+        totalDistanceKm: round1(t.totalDistanceKm + r.totalDistanceKm),
+      }),
+      {
+        vehicles: 0,
+        trips: 0,
+        completed: 0,
+        active: 0,
+        cancelled: 0,
+        onTime: 0,
+        delayed: 0,
+        totalDistanceKm: 0,
+      },
+    );
+
+    const avgUtilizationPct =
+      rows.length === 0
+        ? 0
+        : round1(rows.reduce((s, r) => s + r.utilizationPct, 0) / rows.length);
+
+    return {
+      range: { from: query.from ?? null, to: query.to ?? null },
+      totals: { ...totals, avgUtilizationPct },
+      rows,
+    };
+  }
+
+  /** Vehicle utilization report as JSON for the report view (RPT-03.1). */
+  async getVehicleReport(user: AuthUser, query: VehicleReportQueryDto) {
+    const report = await this.buildVehicleUtilization(user, query);
+    return { success: true, ...report };
+  }
+
+  /**
+   * Vehicle utilization report as a PDF (RPT-03.3 export). Reuses buildVehicleUtilization
+   * for the data and the same pdfkit-to-Buffer approach as the trip/driver/cost reports —
+   * no duplicated report query, no duplicated PDF generation.
+   */
+  async generateVehiclePdf(
+    user: AuthUser,
+    query: VehicleReportQueryDto,
+  ): Promise<Buffer> {
+    const { range, totals, rows } = await this.buildVehicleUtilization(
+      user,
+      query,
+    );
+
+    const doc = new PDFDocument({ margin: 50 });
+    const buffers: Uint8Array[] = [];
+    doc.on('data', (chunk: Buffer) => buffers.push(chunk));
+
+    return new Promise<Buffer>((resolve) => {
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+
+      doc.fontSize(20).text('Vehicle Utilization Report', { align: 'center' });
+      doc.moveDown();
+
+      const period =
+        range.from || range.to
+          ? `${range.from ?? '…'} to ${range.to ?? '…'}`
+          : 'All time';
+      doc.fontSize(10).text(`Period: ${period}`);
+      doc.text(`Generated: ${new Date().toLocaleString()}`);
+      doc.text(
+        `Vehicles: ${totals.vehicles}  Trips: ${totals.trips}  Completed: ${totals.completed}  Avg utilization: ${totals.avgUtilizationPct}%`,
+      );
+      doc.moveDown();
+
+      doc.fontSize(13).text('By vehicle');
+      for (const row of rows) {
+        doc
+          .fontSize(9)
+          .text(
+            `${row.vehicleNumber ?? row.vehicleId}: ${row.totalTrips} trips, ${row.completed} completed, ${row.onTime} on-time (${row.onTimeRate}%), ${row.delayed} late, ${row.utilizationPct}% util, ${row.totalDistanceKm} km, avg ${row.avgDurationMins} min`,
+          );
+      }
+
+      doc.end();
+    });
+  }
+
+  /**
    * Resource availability check (TM-09 / TM-10). Returns the active trips that
    * double-book a candidate vehicle OR driver for the given window. A CLIENT is
    * scoped to its own trips; an ADMIN checks across all trips.
@@ -627,6 +1258,17 @@ export class TripsService {
         },
       },
       include: tripInclude,
+    });
+
+    // NOT-01.2 / NOT-02.1 / NOT-03.1: raise an in-portal notification for the meaningful
+    // transitions (started / delayed / completed). Reuses the same transition that already
+    // writes the STATUS_CHANGED event; the notifications service decides which statuses
+    // actually notify, so this call stays a single line and adds no logic to the trip flow.
+    await this.notifications.onTripStatusChanged({
+      id: trip.id,
+      reference: trip.reference,
+      clientId: trip.clientId,
+      status: trip.status,
     });
 
     return { success: true, trip: this.mapTrip(trip) };

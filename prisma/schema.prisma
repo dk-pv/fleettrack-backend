@@ -143,10 +143,42 @@ model Trip {
   events         TripEvent[]
   breadcrumbs    TripBreadcrumb[]
   delays         Delay[]
+  cost           TripCost?
+  files          FileAsset[]
+  pod            ProofOfDelivery?
 
   @@index([clientId])
   @@index([vehicleId])
   @@index([customerId])
+}
+
+// Trip cost breakdown (TCM-01). One row per trip (1:1), holding both the estimated
+// (TCM-01) and actual (TCM-02) amount for each fixed cost component. Estimated and
+// actual share this single model; variance (TCM-04) is derived (actual − estimated),
+// not stored. Kept out of Trip to avoid bloating it with cost columns.
+model TripCost {
+  id                   String   @id @default(cuid())
+  tripId               String   @unique
+  trip                 Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  // Estimated per component (TCM-01)
+  estimatedFuel        Float    @default(0)
+  estimatedTolls       Float    @default(0)
+  estimatedAllowance   Float    @default(0)
+  estimatedParking     Float    @default(0)
+  estimatedMaintenance Float    @default(0)
+  estimatedMisc        Float    @default(0)
+
+  // Actual per component (TCM-02)
+  actualFuel           Float    @default(0)
+  actualTolls          Float    @default(0)
+  actualAllowance      Float    @default(0)
+  actualParking        Float    @default(0)
+  actualMaintenance    Float    @default(0)
+  actualMisc           Float    @default(0)
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 }
 
 model TripStop {
@@ -292,4 +324,83 @@ model CustomerAddress {
 
   @@index([customerId])
   @@index([customerId, kind])
+}
+
+// Uploaded file (shared upload infrastructure). Provider-agnostic: `storageKey` is the
+// opaque key in whatever storage backend saved it (local filename now; S3/Cloudinary key
+// later) and `provider` records which one — the display URL is resolved at read time by
+// the StorageService, never stored, so switching providers needs no schema change.
+// Domain-neutral: `category` discriminates what a file is (a trip cost receipt, POD photo,
+// POD signature) and every file attaches to a Trip (the delivery both receipts and POD
+// relate to). The owning module interprets the category; the Upload module does not.
+enum FileCategory {
+  RECEIPT
+  POD_PHOTO
+  POD_SIGNATURE
+}
+
+model FileAsset {
+  id             String       @id @default(cuid())
+  storageKey     String       @unique
+  provider       String       @default("local")
+  category       FileCategory
+  originalName   String
+  mimeType       String
+  size           Int
+  tripId         String
+  trip           Trip         @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  uploadedBy     String?
+  uploadedByRole String?
+  createdAt      DateTime     @default(now())
+
+  @@index([tripId])
+  @@index([category])
+  @@index([tripId, category])
+}
+
+// Proof of delivery (POD-01 / POD-03 / POD-04). Delivery-confirmation metadata for a
+// trip — who received it, notes, and when — one row per trip (1:1), mirroring TripCost.
+// The proof MEDIA (photos POD-02/05, signature POD-06) is deliberately NOT stored here:
+// it reuses the shared FileAsset table via category POD_PHOTO / POD_SIGNATURE, so POD
+// adds no upload or storage logic. "Confirmed" is derived from deliveredAt being set.
+model ProofOfDelivery {
+  id              String    @id @default(cuid())
+  tripId          String    @unique
+  trip            Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  recipientName   String?
+  notes           String?
+  deliveredAt     DateTime?
+  confirmedBy     String?
+  confirmedByRole String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// In-portal notification (NOT-01…04). A persisted operational alert raised by a domain
+// event: trip started / delayed / completed (NOT-01.2 / NOT-02.1 / NOT-03.1) and proof of
+// delivery confirmed (NOT-04.1). Scoped by `clientId` (the owning trip's client) so read
+// access follows the same rule as trips — a CLIENT sees only its own, an ADMIN sees all.
+// The NotificationsService is the single writer; on create it emits a lightweight signal
+// over the shared tracking socket. `tripId` is a plain column (no relation) to keep the
+// completed Trip model untouched; the frontend guards the (rare) dangling-trip link.
+enum NotificationType {
+  TRIP_STARTED
+  TRIP_DELAYED
+  TRIP_COMPLETED
+  POD_UPLOADED
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  type      NotificationType
+  title     String
+  message   String
+  clientId  String
+  tripId    String?
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([clientId])
+  @@index([clientId, read])
+  @@index([createdAt])
 }

@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDelayDto } from './dto/create-delay.dto';
 import { DelayStatsQueryDto } from './dto/delay-stats-query.dto';
@@ -171,6 +172,64 @@ export class DelaysService {
       byRoute: [...byRoute.values()].sort(byCount),
       byPeriod: [...byPeriod.values()].sort(byKeyAsc),
     };
+  }
+
+  /**
+   * Delay analysis report as a PDF (RPT-04.2 export). Reuses getStats for the
+   * aggregation — no duplicated delay query — and the same pdfkit-to-Buffer approach
+   * as the trip/cost reports (shared export infrastructure).
+   */
+  async generateStatsPdf(
+    user: AuthUser,
+    query: DelayStatsQueryDto,
+  ): Promise<Buffer> {
+    const stats = await this.getStats(user, query);
+
+    const doc = new PDFDocument({ margin: 50 });
+    const buffers: Uint8Array[] = [];
+    doc.on('data', (chunk: Buffer) => buffers.push(chunk));
+
+    const section = (title: string, buckets: StatBucket[]) => {
+      doc.moveDown();
+      doc.fontSize(13).text(title);
+      if (buckets.length === 0) {
+        doc.fontSize(10).text('No data');
+        return;
+      }
+      for (const bucket of buckets) {
+        doc
+          .fontSize(10)
+          .text(
+            `${bucket.label}: ${bucket.count} delays, ${bucket.totalMinutes} min`,
+          );
+      }
+    };
+
+    return new Promise<Buffer>((resolve) => {
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+
+      doc.fontSize(20).text('Delay Analysis Report', { align: 'center' });
+      doc.moveDown();
+
+      const period =
+        stats.range.from || stats.range.to
+          ? `${stats.range.from ?? '…'} to ${stats.range.to ?? '…'}`
+          : 'All time';
+      doc
+        .fontSize(10)
+        .text(`Period: ${period} (grouped by ${stats.range.period})`);
+      doc.text(`Generated: ${new Date().toLocaleString()}`);
+      doc.text(
+        `Total: ${stats.total.count} delays, ${stats.total.totalMinutes} min`,
+      );
+
+      section('By category', stats.byCategory);
+      section('By driver', stats.byDriver);
+      section('By route', stats.byRoute);
+      section('By period', stats.byPeriod);
+
+      doc.end();
+    });
   }
 
   /** Accumulate one delay into an aggregation bucket keyed by `key`. */

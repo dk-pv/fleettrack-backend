@@ -8,9 +8,10 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 
 import { CustomersService } from './customers.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -20,6 +21,12 @@ import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { CreateAddressDto } from './dto/create-address.dto';
 import { UpdateAddressDto } from './dto/update-address.dto';
+import { CustomerReportQueryDto } from './dto/customer-report-query.dto';
+
+/** Express request with the JWT-authenticated user attached by the guards. */
+interface AuthedRequest extends Request {
+  user: { userId: string; role: string; accountType?: string };
+}
 
 /**
  * Customer directory API (CUS-01 / CUS-02). Tenant-owned data: a CLIENT manages
@@ -114,5 +121,46 @@ export class CustomersController {
     @Param('addressId') addressId: string,
   ) {
     return this.customersService.removeAddress(this.clientId(req), id, addressId);
+  }
+}
+
+/**
+ * Customer delivery report API (RPT-06). Mounted under `customer-reports` (its own
+ * prefix, like `driver-reports` / `vehicle-reports`). CLIENT-only and scoped to the
+ * authenticated client's own trips/customers — customers are tenant-owned, so (unlike
+ * the trip/driver/vehicle reports) there is no ADMIN view. Export reuses the shared
+ * pdfkit pattern; the query groups existing Trip data by customer — no schema.
+ */
+@Controller('customer-reports')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('CLIENT')
+export class CustomerReportController {
+  constructor(private readonly customersService: CustomersService) {}
+
+  @Get('deliveries')
+  getDeliveries(
+    @Req() req: AuthedRequest,
+    @Query() query: CustomerReportQueryDto,
+  ) {
+    return this.customersService.getCustomerReport(req.user.userId, query);
+  }
+
+  @Get('deliveries/export')
+  async exportDeliveries(
+    @Req() req: AuthedRequest,
+    @Query() query: CustomerReportQueryDto,
+    @Res() res: Response,
+  ) {
+    const pdf = await this.customersService.generateCustomerPdf(
+      req.user.userId,
+      query,
+    );
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition':
+        'attachment; filename=customer-delivery-report.pdf',
+    });
+    res.send(pdf);
   }
 }
