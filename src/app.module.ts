@@ -15,11 +15,13 @@ import { TripCostModule } from './trip-cost/trip-cost.module';
 import { UploadModule } from './upload/upload.module';
 import { PodModule } from './pod/pod.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { MailModule } from './mail/mail.module';
 
 @Module({
   imports: [
     ScheduleModule.forRoot(),
     PrismaModule,
+    MailModule,
     AuthModule,
     VehiclesModule,
     ClientsModule,

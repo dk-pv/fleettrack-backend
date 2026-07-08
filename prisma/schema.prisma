@@ -404,3 +404,21 @@ model Notification {
   @@index([clientId, read])
   @@index([createdAt])
 }
+
+// Password reset token (auth). Supports BOTH login principals — a User (ADMIN/VIEWER)
+// and a Client — which live in separate tables, so the account is keyed by email +
+// accountType rather than a relation. The raw token is emailed (or logged in dev); only
+// its SHA-256 hash is stored, so a database leak cannot be used to reset a password.
+// Single-use (usedAt) and time-limited (expiresAt).
+model PasswordResetToken {
+  id          String    @id @default(cuid())
+  tokenHash   String    @unique
+  email       String
+  accountType String
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([email])
+  @@index([expiresAt])
+}
