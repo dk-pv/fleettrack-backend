@@ -18,13 +18,13 @@ model User {
 }
 
 model Client {
-  id        String    @id @default(cuid())
+  id        String     @id @default(cuid())
   name      String
-  email     String    @unique
+  email     String     @unique
   password  String
   apiUrl    String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
   vehicles  Vehicle[]
   trips     Trip[]
   customers Customer[]
@@ -101,23 +101,23 @@ enum TripEventAction {
 }
 
 model Trip {
-  id             String     @id @default(cuid())
-  reference      String
-  status         TripStatus @default(PLANNED)
+  id        String     @id @default(cuid())
+  reference String     @unique
+  status    TripStatus @default(PLANNED)
 
   // Owner (the client that manages the trip)
-  clientId       String
-  client         Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   // Assignment (nullable until assigned)
-  vehicleId      String?
-  vehicle        Vehicle?   @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
-  driverId       String?
-  driverName     String?
+  vehicleId  String?
+  vehicle    Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  driverId   String?
+  driverName String?
 
   // Customer this trip is for (CUS-07) — nullable; detaches on customer delete
-  customerId     String?
-  customer       Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   // Route (coords optional — geocoded on create)
   origin         String
@@ -127,25 +127,32 @@ model Trip {
   destinationLat Float?
   destinationLng Float?
 
-  distanceKm     Float      @default(0)
-  durationMins   Int        @default(0)
-  notes          String?
+  distanceKm   Float   @default(0)
+  durationMins Int     @default(0)
+  notes        String?
 
   scheduledStart DateTime
   scheduledEnd   DateTime
   startedAt      DateTime?
   completedAt    DateTime?
 
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  // ETA-06.1 monitor state (server-side, never user-facing). Persisted so the
+  // once-per-episode alerting is deterministic across restarts and safe with
+  // multiple instances (claimed via atomic compare-and-set). Not driven by, and
+  // never drives, trip.status.
+  etaDelayAlertedAt DateTime? // set while an ETA-predicted delay episode is active
+  etaBaseline       DateTime? // last accepted ETA; a significant drift re-baselines + alerts
 
-  stops          TripStop[]
-  events         TripEvent[]
-  breadcrumbs    TripBreadcrumb[]
-  delays         Delay[]
-  cost           TripCost?
-  files          FileAsset[]
-  pod            ProofOfDelivery?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stops       TripStop[]
+  events      TripEvent[]
+  breadcrumbs TripBreadcrumb[]
+  delays      Delay[]
+  cost        TripCost?
+  files       FileAsset[]
+  pod         ProofOfDelivery?
 
   @@index([clientId])
   @@index([vehicleId])
@@ -157,28 +164,28 @@ model Trip {
 // actual share this single model; variance (TCM-04) is derived (actual − estimated),
 // not stored. Kept out of Trip to avoid bloating it with cost columns.
 model TripCost {
-  id                   String   @id @default(cuid())
-  tripId               String   @unique
-  trip                 Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  tripId String @unique
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
 
   // Estimated per component (TCM-01)
-  estimatedFuel        Float    @default(0)
-  estimatedTolls       Float    @default(0)
-  estimatedAllowance   Float    @default(0)
-  estimatedParking     Float    @default(0)
-  estimatedMaintenance Float    @default(0)
-  estimatedMisc        Float    @default(0)
+  estimatedFuel        Float @default(0)
+  estimatedTolls       Float @default(0)
+  estimatedAllowance   Float @default(0)
+  estimatedParking     Float @default(0)
+  estimatedMaintenance Float @default(0)
+  estimatedMisc        Float @default(0)
 
   // Actual per component (TCM-02)
-  actualFuel           Float    @default(0)
-  actualTolls          Float    @default(0)
-  actualAllowance      Float    @default(0)
-  actualParking        Float    @default(0)
-  actualMaintenance    Float    @default(0)
-  actualMisc           Float    @default(0)
+  actualFuel        Float @default(0)
+  actualTolls       Float @default(0)
+  actualAllowance   Float @default(0)
+  actualParking     Float @default(0)
+  actualMaintenance Float @default(0)
+  actualMisc        Float @default(0)
 
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model TripStop {
@@ -189,6 +196,11 @@ model TripStop {
   sequence Int
   lat      Float?
   lng      Float?
+
+  // TM-02.2 — stop completion (set in sequence while the trip is in transit). The
+  // final stop's completedAt is what gates the trip's COMPLETED transition.
+  completedAt DateTime?
+  completedBy String?
 
   @@index([tripId])
 }
@@ -267,36 +279,36 @@ enum CustomerType {
 }
 
 model Customer {
-  id                 String       @id @default(cuid())
-  name               String
-  type               CustomerType
+  id   String       @id @default(cuid())
+  name String
+  type CustomerType
 
   // Owning client (tenant) — a CLIENT manages only its own customers
-  clientId           String
-  client             Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   // Contact information (CUS-03.1)
-  company            String?
-  contactPerson      String?
-  email              String?
-  phone              String?
-  address            String?
+  company       String?
+  contactPerson String?
+  email         String?
+  phone         String?
+  address       String?
 
   // Tax / registration details (CUS-04.1)
   taxId              String?
   registrationNumber String?
 
   // Free-text notes (CUS-08.1)
-  notes              String?
+  notes String?
 
-  createdAt          DateTime     @default(now())
-  updatedAt          DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Reusable pickup/delivery address book (CUS-05 / CUS-06)
-  addresses          CustomerAddress[]
+  addresses CustomerAddress[]
 
   // Trips placed for this customer (CUS-07)
-  trips              Trip[]
+  trips Trip[]
 
   @@index([clientId])
   @@index([type])
@@ -339,19 +351,33 @@ enum FileCategory {
   POD_SIGNATURE
 }
 
+// TCM-03.2 — the fixed trip-cost components a RECEIPT file can be attached to. Mirrors
+// COST_COMPONENTS in trip-cost.util.ts (uppercased). Only meaningful for RECEIPT files.
+enum CostComponent {
+  FUEL
+  TOLLS
+  ALLOWANCE
+  PARKING
+  MAINTENANCE
+  MISC
+}
+
 model FileAsset {
-  id             String       @id @default(cuid())
-  storageKey     String       @unique
-  provider       String       @default("local")
+  id             String         @id @default(cuid())
+  storageKey     String         @unique
+  provider       String         @default("local")
   category       FileCategory
+  // TCM-03.2 — for a RECEIPT, the cost component it belongs to (null = general/trip-level
+  // receipt). Ignored for POD_* categories. Additive + nullable, so existing files stay valid.
+  costComponent  CostComponent?
   originalName   String
   mimeType       String
   size           Int
   tripId         String
-  trip           Trip         @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  trip           Trip           @relation(fields: [tripId], references: [id], onDelete: Cascade)
   uploadedBy     String?
   uploadedByRole String?
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime       @default(now())
 
   @@index([tripId])
   @@index([category])
@@ -372,8 +398,16 @@ model ProofOfDelivery {
   deliveredAt     DateTime?
   confirmedBy     String?
   confirmedByRole String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+
+  // POD-04.1/04.2 — delivery geolocation captured on confirmation (additive, nullable
+  // so existing PODs stay valid). Optional by design: capture failure never blocks
+  // confirmation, so any of these may be null even for a confirmed delivery.
+  deliveredLat              Float? // latitude  (−90..90)
+  deliveredLng              Float? // longitude (−180..180)
+  deliveredLocationAccuracy Float? // fix accuracy in metres (>= 0), from the Geolocation API
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // In-portal notification (NOT-01…04). A persisted operational alert raised by a domain

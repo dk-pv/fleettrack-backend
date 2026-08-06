@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { FileAsset, FileCategory } from '@prisma/client';
+import { CostComponent, FileAsset, FileCategory } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { STORAGE_SERVICE, StorageService } from './storage/storage.service';
 
@@ -44,7 +44,12 @@ export class UploadService {
 
   async store(
     user: AuthUser,
-    params: { tripId: string; category: FileCategory; file: UploadedFileInput },
+    params: {
+      tripId: string;
+      category: FileCategory;
+      costComponent?: CostComponent;
+      file: UploadedFileInput;
+    },
   ) {
     await this.getAccessibleTrip(user, params.tripId);
 
@@ -58,6 +63,8 @@ export class UploadService {
         storageKey: saved.storageKey,
         provider: saved.provider,
         category: params.category,
+        // TCM-03.2 — only meaningful for RECEIPT; null otherwise (POD / general receipt).
+        costComponent: params.costComponent ?? null,
         originalName: params.file.originalName,
         mimeType: params.file.mimeType,
         size: params.file.size,
@@ -70,11 +77,20 @@ export class UploadService {
     return { success: true, file: this.toDto(asset) };
   }
 
-  async list(user: AuthUser, tripId: string, category?: FileCategory) {
+  async list(
+    user: AuthUser,
+    tripId: string,
+    category?: FileCategory,
+    costComponent?: CostComponent,
+  ) {
     await this.getAccessibleTrip(user, tripId);
 
     const files = await this.prisma.fileAsset.findMany({
-      where: { tripId, ...(category ? { category } : {}) },
+      where: {
+        tripId,
+        ...(category ? { category } : {}),
+        ...(costComponent ? { costComponent } : {}),
+      },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -115,6 +131,7 @@ export class UploadService {
     return {
       id: file.id,
       category: file.category,
+      costComponent: file.costComponent, // TCM-03.2 (null for POD / general receipts)
       originalName: file.originalName,
       mimeType: file.mimeType,
       size: file.size,

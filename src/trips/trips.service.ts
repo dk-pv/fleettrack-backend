@@ -3,10 +3,13 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { Prisma, TripEventAction, TripStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
+import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTripDto } from './dto/create-trip.dto';
 import { TripReportQueryDto } from './dto/trip-report-query.dto';
@@ -17,14 +20,17 @@ import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
 import {
   computeRouteProgress,
+  haversineDistance,
   routeTotalDistance,
   GeoPoint,
 } from './trip-progress.util';
-import { computeEta } from './trip-eta.util';
+import { computeStopOptimization } from './route-optimize.util';
+import { computeEta, EtaResult } from './trip-eta.util';
 import { detectDelay, DEFAULT_DELAY_MARGIN_MINUTES } from './trip-delay.util';
 import {
   buildDelayAlert,
   buildEtaShiftAlert,
+  DEFAULT_ETA_SHIFT_ALERT_MINUTES,
   EtaAlert,
 } from './trip-eta-alert.util';
 import { EtaAlertsQueryDto } from './dto/eta-alerts-query.dto';
@@ -67,6 +73,15 @@ interface VehiclePerfAccumulator {
 
 const ROUTE_DEVIATION_THRESHOLD_M = 2000;
 
+/** Attempts to (re)generate a colliding reference before giving up (TM-01.2). */
+const MAX_REFERENCE_ATTEMPTS = 5;
+
+/**
+ * Route distance (m) still remaining within which the vehicle counts as having
+ * reached the final stop / destination — the completion tolerance for TM-02.2.
+ */
+const ARRIVAL_TOLERANCE_M = 250;
+
 const STATUS_NOTE: Record<TripStatus, string> = {
   PLANNED: 'Trip created',
   ASSIGNED: 'Vehicle & driver assigned',
@@ -101,6 +116,13 @@ const ETA_ACTIVE_STATUSES: TripStatus[] = [
   TripStatus.DELAYED,
 ];
 
+/** Statuses in which a stop may be marked completed — the trip is in transit (TM-02.2). */
+const STOP_COMPLETABLE_STATUSES: TripStatus[] = [
+  TripStatus.STARTED,
+  TripStatus.ONGOING,
+  TripStatus.DELAYED,
+];
+
 const tripInclude = {
   client: { select: { id: true, name: true } },
   vehicle: { select: { id: true, vehicleNumber: true, vehicleName: true } },
@@ -108,8 +130,27 @@ const tripInclude = {
   stops: { orderBy: { sequence: 'asc' as const } },
 };
 
+/** The minimal trip shape the ETA monitor (ETA-06.1) loads and reasons over. */
+interface EtaScanTrip {
+  id: string;
+  reference: string;
+  clientId: string;
+  status: TripStatus;
+  scheduledEnd: Date;
+  etaDelayAlertedAt: Date | null;
+  etaBaseline: Date | null;
+  originLat: number | null;
+  originLng: number | null;
+  destinationLat: number | null;
+  destinationLng: number | null;
+  stops: { lat: number | null; lng: number | null }[];
+  vehicle: { latitude: number; longitude: number; speed: number | null } | null;
+}
+
 @Injectable()
 export class TripsService {
+  private readonly logger = new Logger(TripsService.name);
+
   constructor(
     private prisma: PrismaService,
     private geocoding: GeocodingService,
@@ -237,6 +278,50 @@ export class TripsService {
     if (!trip) throw new NotFoundException('Trip not found');
     this.assertReadable(user, trip.clientId);
 
+    const { eta, remainingMeters, hasVehiclePosition } = this.computeTripEta(
+      trip,
+      new Date(),
+    );
+
+    return {
+      success: true,
+      eta: eta
+        ? {
+            etaTimestamp: eta.etaTimestamp,
+            etaSeconds: eta.etaSeconds,
+            basisSpeedKmh: eta.basisSpeedKmh,
+            remainingMeters,
+            hasVehiclePosition,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Shared destination-ETA core (ETA-01.1) reused by getEta and the ETA monitor —
+   * one place for the "active + live position + distance remaining" gate so the
+   * cron never duplicates the ETA maths. Pure given the loaded trip + `now`.
+   */
+  private computeTripEta(
+    trip: {
+      status: TripStatus;
+      originLat: number | null;
+      originLng: number | null;
+      destinationLat: number | null;
+      destinationLng: number | null;
+      stops: { lat: number | null; lng: number | null }[];
+      vehicle: {
+        latitude: number;
+        longitude: number;
+        speed: number | null;
+      } | null;
+    },
+    now: Date,
+  ): {
+    eta: EtaResult | null;
+    remainingMeters: number;
+    hasVehiclePosition: boolean;
+  } {
     const position = this.vehiclePosition(trip.vehicle);
     const progress = computeRouteProgress(this.routePoints(trip), position);
     const hasVehiclePosition = position !== null;
@@ -247,20 +332,13 @@ export class TripsService {
       progress.remainingMeters > 0;
 
     const eta = canEstimate
-      ? computeEta(progress.remainingMeters, trip.vehicle?.speed, new Date())
+      ? computeEta(progress.remainingMeters, trip.vehicle?.speed, now)
       : null;
 
     return {
-      success: true,
-      eta: eta
-        ? {
-            etaTimestamp: eta.etaTimestamp,
-            etaSeconds: eta.etaSeconds,
-            basisSpeedKmh: eta.basisSpeedKmh,
-            remainingMeters: progress.remainingMeters,
-            hasVehiclePosition,
-          }
-        : null,
+      eta,
+      remainingMeters: progress.remainingMeters,
+      hasVehiclePosition,
     };
   }
 
@@ -425,6 +503,165 @@ export class TripsService {
       baselineEtaTimestamp,
       alerts,
     };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* ETA monitor (ETA-06.1) — server-side alert dispatch              */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Every minute, evaluate active trips and dispatch ETA alerts. Lives here (not in
+   * the tracking module) so it can reuse NotificationsService without a circular
+   * module dependency. Wrapped so a scan failure never crashes the scheduler; the
+   * next tick retries. Delegates to the testable {@link runEtaAlertScan}.
+   */
+  @Cron('0 * * * * *')
+  async scanEtaAlerts(): Promise<void> {
+    try {
+      await this.runEtaAlertScan(new Date());
+    } catch (err) {
+      this.logger.warn(
+        `ETA alert scan failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Testable core of the ETA monitor: evaluate every active trip against `now`.
+   * Per-trip failures are isolated so one bad trip never blocks the rest.
+   */
+  async runEtaAlertScan(now: Date): Promise<void> {
+    const trips = await this.prisma.trip.findMany({
+      where: { status: { in: ETA_ACTIVE_STATUSES } },
+      include: {
+        vehicle: { select: { latitude: true, longitude: true, speed: true } },
+        stops: { orderBy: { sequence: 'asc' } },
+      },
+    });
+
+    for (const trip of trips) {
+      try {
+        await this.evaluateTripEtaAlerts(trip, now);
+      } catch (err) {
+        this.logger.warn(
+          `ETA alert eval failed for trip ${trip.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * ETA-06.1 for one trip. Two independent, persisted-state conditions, at most one
+   * notification per trip per tick:
+   *
+   *  A. ETA-predicted DELAY — reference arrival (predicted ETA, else `now`) runs past
+   *     scheduledEnd + margin. Derived from the ETA calc, NEVER from trip.status; no
+   *     status transition. Once per episode via the `etaDelayAlertedAt` flag; cleared
+   *     on recovery so a later episode re-alerts.
+   *  B. Significant ETA SHIFT — live ETA drifts ≥ threshold from the accepted
+   *     `etaBaseline`. A significant drift (either direction) atomically re-baselines;
+   *     only a *later* shift notifies (an earlier ETA is not a delay).
+   *
+   * Every state change is an atomic compare-and-set (updateMany with the prior value
+   * in the WHERE) so it is safe across restarts and multiple instances. On a
+   * notification persistence failure the claim is rolled back — but only if the row
+   * still holds this scan's claimed value — so a future scan can retry.
+   */
+  private async evaluateTripEtaAlerts(
+    trip: EtaScanTrip,
+    now: Date,
+  ): Promise<void> {
+    const { eta } = this.computeTripEta(trip, now);
+    const currentEta = eta ? new Date(eta.etaTimestamp) : null;
+
+    // ---- Condition A: ETA-predicted delay ----
+    const referenceArrival = currentEta ?? now;
+    const delay = detectDelay(
+      trip.scheduledEnd,
+      referenceArrival,
+      DEFAULT_DELAY_MARGIN_MINUTES,
+    );
+    let delayNotifiedThisTick = false;
+
+    if (delay.isDelayed) {
+      if (trip.etaDelayAlertedAt === null) {
+        // CAS claim: null → now. Only one scanner/instance wins.
+        const claim = await this.prisma.trip.updateMany({
+          where: { id: trip.id, etaDelayAlertedAt: null },
+          data: { etaDelayAlertedAt: now },
+        });
+        if (claim.count === 1) {
+          const created = await this.notifications.onEtaDelay(
+            trip,
+            delay.delayMinutes,
+          );
+          if (created) {
+            delayNotifiedThisTick = true;
+          } else {
+            // Rollback — only if the row still holds *our* claim (not a newer write).
+            await this.prisma.trip.updateMany({
+              where: { id: trip.id, etaDelayAlertedAt: now },
+              data: { etaDelayAlertedAt: null },
+            });
+          }
+        }
+      }
+      // else: episode already alerted → no duplicate.
+    } else if (trip.etaDelayAlertedAt !== null) {
+      // Recovery → re-arm for a future episode.
+      await this.prisma.trip.updateMany({
+        where: { id: trip.id },
+        data: { etaDelayAlertedAt: null },
+      });
+    }
+
+    // ---- Condition B: significant ETA shift (needs a current ETA) ----
+    if (currentEta === null) return;
+
+    if (trip.etaBaseline === null) {
+      // First live ETA → establish the baseline; no notification.
+      await this.prisma.trip.updateMany({
+        where: { id: trip.id, etaBaseline: null },
+        data: { etaBaseline: currentEta },
+      });
+      return;
+    }
+
+    const shiftAlert = buildEtaShiftAlert(
+      trip.etaBaseline,
+      currentEta,
+      DEFAULT_ETA_SHIFT_ALERT_MINUTES,
+    );
+    if (!shiftAlert) return; // within tolerance → baseline held, no alert.
+
+    // Significant drift (either direction) → CAS re-baseline to the new ETA.
+    const oldBaseline = trip.etaBaseline;
+    const claim = await this.prisma.trip.updateMany({
+      where: { id: trip.id, etaBaseline: oldBaseline },
+      data: { etaBaseline: currentEta },
+    });
+    if (claim.count !== 1) return; // lost the race → another scan re-baselined.
+
+    const isLater = currentEta.getTime() > oldBaseline.getTime();
+
+    // Notify only for a LATER shift, and never a second notification in the same tick
+    // when the delay alert already fired (precedence). The baseline has still moved,
+    // so the suppressed shift won't re-fire as a duplicate next tick.
+    if (!isLater || delayNotifiedThisTick) return;
+
+    const created = await this.notifications.onEtaShift(
+      trip,
+      shiftAlert.minutes,
+    );
+    if (!created) {
+      // Rollback baseline — only if it still equals the value we claimed.
+      await this.prisma.trip.updateMany({
+        where: { id: trip.id, etaBaseline: currentEta },
+        data: { etaBaseline: oldBaseline },
+      });
+    }
   }
 
   /**
@@ -1054,6 +1291,48 @@ export class TripsService {
     return { success: true, hasOverlap: conflicts.length > 0, conflicts };
   }
 
+  /**
+   * Assignable drivers for the trip create form (TM-10.1 driver lookup). The domain
+   * models a driver only as `Vehicle.driverName` — there is no Driver entity or driver
+   * id anywhere in the Phase-1 data — so the list is derived from the caller's vehicles:
+   * distinct, non-empty driver names, scoped exactly like findAll (a CLIENT sees only
+   * its own vehicles' drivers; an ADMIN sees all, or one client's via clientId).
+   *
+   * Identity is a deterministic, name-derived id (`drv:` + the lower-cased,
+   * whitespace-collapsed name) — never random, never a vehicleId, never generated by the
+   * client. It is exactly what the create call stores as Trip.driverId and what the
+   * DRIVER_OVERLAP guard matches, so the same driver double-booked over an overlapping
+   * window is still rejected. Same-named drivers collapse to a single entry: the Phase-1
+   * model stores nothing else to tell them apart, and for a double-booking guard
+   * collapsing (over-matching) is the fail-safe direction.
+   */
+  async listDrivers(user: AuthUser, clientId?: string) {
+    const where: Prisma.VehicleWhereInput =
+      user.role === 'CLIENT'
+        ? { clientId: user.userId }
+        : clientId
+          ? { clientId }
+          : {};
+
+    const vehicles = await this.prisma.vehicle.findMany({
+      where,
+      select: { driverName: true },
+    });
+
+    const byId = new Map<string, { id: string; name: string }>();
+    for (const { driverName } of vehicles) {
+      const name = driverName?.trim();
+      if (!name) continue;
+      const id = `drv:${name.toLowerCase().replace(/\s+/g, '-')}`;
+      if (!byId.has(id)) byId.set(id, { id, name });
+    }
+
+    const drivers = [...byId.values()].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    return { drivers };
+  }
+
   /* ---------------------------------------------------------------- */
   /* Writes (CLIENT only — enforced by @Roles + ownership below)       */
   /* ---------------------------------------------------------------- */
@@ -1095,43 +1374,70 @@ export class TripsService {
     const initialStatus =
       dto.vehicleId && dto.driverId ? TripStatus.ASSIGNED : TripStatus.PLANNED;
 
-    const trip = await this.prisma.trip.create({
-      data: {
-        reference: dto.reference ?? this.generateReference(),
-        status: initialStatus,
-        clientId: user.userId, // owner is always the authenticated client
-        vehicleId: dto.vehicleId ?? null,
-        driverId: dto.driverId ?? null,
-        driverName: dto.driverName ?? null,
-        customerId: dto.customerId ?? null,
-        origin: dto.origin,
-        originLat: origin.lat,
-        originLng: origin.lng,
-        destination: dto.destination,
-        destinationLat: destination.lat,
-        destinationLng: destination.lng,
-        distanceKm: dto.distanceKm ?? 0,
-        durationMins: dto.durationMins ?? 0,
-        notes: dto.notes ?? null,
-        scheduledStart: new Date(dto.scheduledStart),
-        scheduledEnd: new Date(dto.scheduledEnd),
-        stops: {
-          create: stops,
-        },
-        events: {
-          create: {
-            action: TripEventAction.CREATED,
-            status: initialStatus,
-            note: STATUS_NOTE[initialStatus],
-            actorRole: actor.role,
-            actorName: actor.name,
-          },
-        },
-      },
-      include: tripInclude,
-    });
+    // TM-01.2: persist with a genuinely unique reference. `Trip.reference` has a
+    // DB-level unique index; generation uses a CSPRNG (collision-resistant), and on the
+    // astronomically rare collision we regenerate and retry. A caller-supplied reference
+    // that is already taken is a hard 409 — never silently rewritten.
+    const callerSuppliedReference =
+      typeof dto.reference === 'string' && dto.reference.trim() !== '';
 
-    return { success: true, trip: this.mapTrip(trip) };
+    for (let attempt = 0; attempt <= MAX_REFERENCE_ATTEMPTS; attempt++) {
+      const reference = callerSuppliedReference
+        ? dto.reference!.trim()
+        : this.generateReference();
+      try {
+        const trip = await this.prisma.trip.create({
+          data: {
+            reference,
+            status: initialStatus,
+            clientId: user.userId, // owner is always the authenticated client
+            vehicleId: dto.vehicleId ?? null,
+            driverId: dto.driverId ?? null,
+            driverName: dto.driverName ?? null,
+            customerId: dto.customerId ?? null,
+            origin: dto.origin,
+            originLat: origin.lat,
+            originLng: origin.lng,
+            destination: dto.destination,
+            destinationLat: destination.lat,
+            destinationLng: destination.lng,
+            distanceKm: dto.distanceKm ?? 0,
+            durationMins: dto.durationMins ?? 0,
+            notes: dto.notes ?? null,
+            scheduledStart: new Date(dto.scheduledStart),
+            scheduledEnd: new Date(dto.scheduledEnd),
+            stops: {
+              create: stops,
+            },
+            events: {
+              create: {
+                action: TripEventAction.CREATED,
+                status: initialStatus,
+                note: STATUS_NOTE[initialStatus],
+                actorRole: actor.role,
+                actorName: actor.name,
+              },
+            },
+          },
+          include: tripInclude,
+        });
+
+        return { success: true, trip: this.mapTrip(trip) };
+      } catch (err) {
+        if (this.isReferenceConflict(err)) {
+          // A specific reference the caller asked for is taken → 409 (do not change it).
+          if (callerSuppliedReference) {
+            throw new ConflictException('REFERENCE_TAKEN');
+          }
+          // Auto-generated collision → try a fresh reference on the next iteration.
+          if (attempt < MAX_REFERENCE_ATTEMPTS) continue;
+        }
+        throw err;
+      }
+    }
+
+    // Unreachable in practice (a CSPRNG reference colliding 5× is ~nil).
+    throw new ConflictException('REFERENCE_GENERATION_FAILED');
   }
 
   async update(user: AuthUser, id: string, dto: UpdateTripDto) {
@@ -1162,6 +1468,12 @@ export class TripsService {
 
     const actor = await this.resolveActor(user);
 
+    // TM-16.1: make a (re)assignment auditable — a change to the vehicle or driver is
+    // logged with a distinct note (actor + time are always captured on the event).
+    const reassigned =
+      (dto.vehicleId !== undefined && dto.vehicleId !== existing.vehicleId) ||
+      (dto.driverId !== undefined && dto.driverId !== existing.driverId);
+
     const data: Prisma.TripUncheckedUpdateInput = {
       reference: dto.reference,
       vehicleId: dto.vehicleId,
@@ -1178,7 +1490,9 @@ export class TripsService {
       events: {
         create: {
           action: TripEventAction.UPDATED,
-          note: 'Trip details updated',
+          note: reassigned
+            ? 'Vehicle/driver assignment updated'
+            : 'Trip details updated',
           actorRole: actor.role,
           actorName: actor.name,
         },
@@ -1227,6 +1541,105 @@ export class TripsService {
     return { success: true, trip: this.mapTrip(trip) };
   }
 
+  /**
+   * TM-06.2 — compute an optimised stop order on the SERVER (greedy nearest-neighbour
+   * over geocoded coordinates, with the pickup + destination fixed) and PERSIST the new
+   * 1-based sequence. Allowed only before the trip starts (STOP_EDITABLE_STATUSES), like
+   * manual stop editing; the client can still reorder manually afterwards via PATCH, so
+   * manual override is preserved. Reuses the shared Haversine util — Google Routes
+   * (TM-06.1) remains out of scope. CLIENT-scoped (ownership enforced by getOwned).
+   */
+  async optimizeStops(user: AuthUser, id: string) {
+    const existing = await this.getOwned(user, id);
+
+    // TM-05.1 rule: stops (and therefore their order) are frozen once the trip starts.
+    if (!STOP_EDITABLE_STATUSES.includes(existing.status)) {
+      throw new BadRequestException('STOPS_LOCKED');
+    }
+
+    const stops = await this.prisma.tripStop.findMany({
+      where: { tripId: id },
+      orderBy: { sequence: 'asc' },
+    });
+    // Fewer than two intermediate stops → nothing to reorder.
+    if (stops.length < 2) {
+      throw new BadRequestException('NOT_ENOUGH_STOPS');
+    }
+
+    // Resolve coordinates for the fixed endpoints and every stop (geocode any missing).
+    const origin = await this.resolveCoords(
+      existing.origin,
+      existing.originLat,
+      existing.originLng,
+    );
+    const destination = await this.resolveCoords(
+      existing.destination,
+      existing.destinationLat,
+      existing.destinationLng,
+    );
+    if (
+      origin.lat == null ||
+      origin.lng == null ||
+      destination.lat == null ||
+      destination.lng == null
+    ) {
+      throw new BadRequestException('ROUTE_NOT_GEOCODABLE');
+    }
+
+    const stopCoords: GeoPoint[] = [];
+    for (const stop of stops) {
+      const c = await this.resolveCoords(stop.address, stop.lat, stop.lng);
+      if (c.lat == null || c.lng == null) {
+        throw new BadRequestException('ROUTE_NOT_GEOCODABLE');
+      }
+      stopCoords.push({ lat: c.lat, lng: c.lng });
+    }
+
+    const result = computeStopOptimization(
+      { lat: origin.lat, lng: origin.lng },
+      { lat: destination.lat, lng: destination.lng },
+      stopCoords,
+    );
+
+    const actor = await this.resolveActor(user);
+
+    // Persist the optimised order: rewrite the stops in the new sequence (1-based),
+    // keeping the coordinates we just resolved so a read doesn't re-geocode. Reuses the
+    // delete+create idiom from update() for one atomic reorder.
+    const reordered = result.order.map((originalIndex, i) => ({
+      address: stops[originalIndex].address,
+      sequence: i + 1,
+      lat: stopCoords[originalIndex].lat,
+      lng: stopCoords[originalIndex].lng,
+    }));
+
+    const trip = await this.prisma.trip.update({
+      where: { id },
+      data: {
+        stops: { deleteMany: {}, create: reordered },
+        events: {
+          create: {
+            action: TripEventAction.UPDATED,
+            note: 'Stops optimised (nearest-neighbour)',
+            actorRole: actor.role,
+            actorName: actor.name,
+          },
+        },
+      },
+      include: tripInclude,
+    });
+
+    return {
+      success: true,
+      trip: this.mapTrip(trip),
+      optimization: {
+        order: result.order,
+        originalDistanceMeters: result.originalDistanceMeters,
+        optimizedDistanceMeters: result.optimizedDistanceMeters,
+      },
+    };
+  }
+
   async updateStatus(user: AuthUser, id: string, dto: UpdateTripStatusDto) {
     const existing = await this.getOwned(user, id);
 
@@ -1234,6 +1647,12 @@ export class TripsService {
       throw new BadRequestException(
         `Cannot change status from ${existing.status} to ${dto.status}`,
       );
+    }
+
+    // TM-02.2 — final-stop completion rule: a trip may only be COMPLETED once its final
+    // ordered stop has been completed (deterministic; independent of live GPS).
+    if (dto.status === TripStatus.COMPLETED) {
+      await this.assertFinalStopCompleted(id);
     }
 
     const actor = await this.resolveActor(user);
@@ -1269,6 +1688,69 @@ export class TripsService {
       reference: trip.reference,
       clientId: trip.clientId,
       status: trip.status,
+    });
+
+    return { success: true, trip: this.mapTrip(trip) };
+  }
+
+  /**
+   * TM-02.2 — mark a stop reached/completed. CLIENT-owned trip only; the trip must be
+   * in transit; stops complete strictly in sequence; an already-completed stop is an
+   * idempotent no-op. GPS proximity (when available) annotates the audit event but never
+   * gates completion. Writes the completion + a TripEvent atomically (TM-16.1 audit).
+   */
+  async completeStop(user: AuthUser, tripId: string, stopId: string) {
+    const existing = await this.getOwned(user, tripId);
+
+    if (!STOP_COMPLETABLE_STATUSES.includes(existing.status)) {
+      throw new BadRequestException('STOP_NOT_COMPLETABLE');
+    }
+
+    const stops = await this.prisma.tripStop.findMany({
+      where: { tripId },
+      orderBy: { sequence: 'asc' },
+    });
+
+    const target = stops.find((s) => s.id === stopId);
+    if (!target) throw new NotFoundException('Stop not found');
+
+    // Idempotent: completing an already-completed stop changes nothing.
+    if (target.completedAt) {
+      const current = await this.prisma.trip.findUnique({
+        where: { id: tripId },
+        include: tripInclude,
+      });
+      return { success: true, trip: this.mapTrip(current) };
+    }
+
+    // Order rule: every earlier-sequence stop must already be completed.
+    const earlierPending = stops.some(
+      (s) => s.sequence < target.sequence && !s.completedAt,
+    );
+    if (earlierPending) throw new BadRequestException('STOP_OUT_OF_ORDER');
+
+    const actor = await this.resolveActor(user);
+    const gpsNote = await this.describeStopArrival(existing.vehicleId, target);
+
+    const trip = await this.prisma.trip.update({
+      where: { id: tripId },
+      data: {
+        stops: {
+          update: {
+            where: { id: stopId },
+            data: { completedAt: new Date(), completedBy: actor.name },
+          },
+        },
+        events: {
+          create: {
+            action: TripEventAction.UPDATED,
+            note: `Stop ${target.sequence} reached: ${target.address}${gpsNote}`,
+            actorRole: actor.role,
+            actorName: actor.name,
+          },
+        },
+      },
+      include: tripInclude,
     });
 
     return { success: true, trip: this.mapTrip(trip) };
@@ -1345,8 +1827,27 @@ export class TripsService {
 
   private generateReference(): string {
     const year = new Date().getFullYear();
-    const rand = Math.floor(1000 + Math.random() * 9000);
+    // 8 hex chars (~4.3e9 space) from a CSPRNG — collision-resistant; the DB unique
+    // index + retry-on-collision in create() make the stored reference genuinely unique.
+    const rand = randomBytes(4).toString('hex').toUpperCase();
     return `TRIP-${year}-${rand}`;
+  }
+
+  /** True when a Prisma error is a unique-constraint violation on Trip.reference. */
+  private isReferenceConflict(err: unknown): boolean {
+    if (
+      !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+      err.code !== 'P2002'
+    ) {
+      return false;
+    }
+    const target = err.meta?.target;
+    const mentionsReference = (value: string): boolean =>
+      value.toLowerCase().includes('reference');
+    if (Array.isArray(target)) {
+      return target.some((t) => typeof t === 'string' && mentionsReference(t));
+    }
+    return typeof target === 'string' && mentionsReference(target);
   }
 
   /* ---------------------------------------------------------------- */
@@ -1487,6 +1988,57 @@ export class TripsService {
   /* Shaping helpers (Prisma row -> API shape the frontend consumes)   */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * TM-02.2 — deterministic final-stop completion rule. A trip may only be COMPLETED
+   * once its final ordered stop has been completed. Stops are completed strictly in
+   * sequence (completeStop enforces order), so the last stop being done implies all
+   * are. Trips with no intermediate stops have no final stop and complete freely
+   * (single-stop / direct trips). Read entirely from persisted `completedAt` — it never
+   * depends on live GPS availability (this supersedes the earlier fail-open guard).
+   */
+  private async assertFinalStopCompleted(id: string) {
+    const stops = await this.prisma.tripStop.findMany({
+      where: { tripId: id },
+      orderBy: { sequence: 'asc' },
+    });
+    if (stops.length === 0) return;
+
+    const finalStop = stops[stops.length - 1];
+    if (!finalStop.completedAt) {
+      throw new BadRequestException('FINAL_STOP_NOT_COMPLETED');
+    }
+  }
+
+  /**
+   * GPS-assist annotation for a stop completion — the repurposed route-progress signal.
+   * Returns a short suffix noting whether the assigned vehicle's live position
+   * corroborates arrival at the stop. Purely informational (never blocks; completion is
+   * deterministic); empty when there is no telemetry to corroborate.
+   */
+  private async describeStopArrival(
+    vehicleId: string | null,
+    stop: { lat: number | null; lng: number | null },
+  ): Promise<string> {
+    if (!vehicleId || stop.lat == null || stop.lng == null) return '';
+
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+      select: { latitude: true, longitude: true },
+    });
+    const position = this.vehiclePosition(vehicle);
+    if (!position) return '';
+
+    const meters = haversineDistance(
+      position.lat,
+      position.lng,
+      stop.lat,
+      stop.lng,
+    );
+    return meters <= ARRIVAL_TOLERANCE_M
+      ? ' (GPS-confirmed)'
+      : ` (GPS ${Math.round(meters)} m away)`;
+  }
+
   private routePoints(trip: {
     originLat: number | null;
     originLng: number | null;
@@ -1554,15 +2106,27 @@ export class TripsService {
         t.destinationLat != null && t.destinationLng != null
           ? { lat: t.destinationLat, lng: t.destinationLng }
           : undefined,
-      stops: (t.stops ?? []).map((s: any) => ({
-        id: s.id,
-        address: s.address,
-        sequence: s.sequence,
-        coords:
-          s.lat != null && s.lng != null
-            ? { lat: s.lat, lng: s.lng }
-            : undefined,
-      })),
+      stops: (t.stops ?? []).map(
+        (s: {
+          id: string;
+          address: string;
+          sequence: number;
+          lat: number | null;
+          lng: number | null;
+          completedAt: Date | null;
+          completedBy: string | null;
+        }) => ({
+          id: s.id,
+          address: s.address,
+          sequence: s.sequence,
+          coords:
+            s.lat != null && s.lng != null
+              ? { lat: s.lat, lng: s.lng }
+              : undefined,
+          completedAt: s.completedAt ?? null,
+          completedBy: s.completedBy ?? null,
+        }),
+      ),
       distanceKm: t.distanceKm,
       durationMins: t.durationMins,
       notes: t.notes,

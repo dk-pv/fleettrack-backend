@@ -62,6 +62,13 @@ export class TripsController {
     return this.tripsService.checkOverlap((req as any).user, query);
   }
 
+  // TM-10.1 driver lookup. Must precede @Get(':id') so ':id' can't capture "drivers".
+  @Roles('ADMIN', 'CLIENT')
+  @Get('drivers')
+  listDrivers(@Req() req: AuthedRequest, @Query('clientId') clientId?: string) {
+    return this.tripsService.listDrivers(req.user, clientId);
+  }
+
   @Roles('ADMIN', 'CLIENT')
   @Get(':id')
   findOne(@Req() req: Request, @Param('id') id: string) {
@@ -122,6 +129,24 @@ export class TripsController {
     @Body() dto: UpdateTripStatusDto,
   ) {
     return this.tripsService.updateStatus((req as any).user, id, dto);
+  }
+
+  // TM-06.2: server-side optimise & persist the stop sequence (before start).
+  @Roles('CLIENT')
+  @Post(':id/optimize-stops')
+  optimizeStops(@Req() req: AuthedRequest, @Param('id') id: string) {
+    return this.tripsService.optimizeStops(req.user, id);
+  }
+
+  // TM-02.2: mark a stop reached/completed (in transit; enforces sequence order).
+  @Roles('CLIENT')
+  @Patch(':id/stops/:stopId/complete')
+  completeStop(
+    @Req() req: AuthedRequest,
+    @Param('id') id: string,
+    @Param('stopId') stopId: string,
+  ) {
+    return this.tripsService.completeStop(req.user, id, stopId);
   }
 
   @Roles('CLIENT')

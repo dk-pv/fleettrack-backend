@@ -6,6 +6,7 @@ import {
 import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateDelayDto } from './dto/create-delay.dto';
 import { DelayStatsQueryDto } from './dto/delay-stats-query.dto';
 
@@ -33,7 +34,10 @@ function titleCase(value: string): string {
  */
 @Injectable()
 export class DelaysService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
 
   private readonly delayInclude = {
     trip: { select: { id: true, reference: true, clientId: true } },
@@ -51,7 +55,7 @@ export class DelaysService {
 
   /** Ingest a reported delay against a trip (DLY-01.1). */
   async create(user: AuthUser, dto: CreateDelayDto) {
-    await this.getAccessibleTrip(user, dto.tripId);
+    const trip = await this.getAccessibleTrip(user, dto.tripId);
 
     const delay = await this.prisma.delay.create({
       data: {
@@ -66,6 +70,16 @@ export class DelaysService {
       },
       include: this.delayInclude,
     });
+
+    // NOT-02.1: one "Delay reported" notification per successful report, scoped to
+    // the owning client + trip. Deliberately independent of the ETA monitor — it
+    // does NOT touch etaDelayAlertedAt / etaBaseline (a human report and an
+    // ETA-predicted delay are distinct events). Non-throwing: a notification failure
+    // never rolls back or fails the already-persisted delay report.
+    await this.notifications.onDelayReported(
+      { id: trip.id, reference: trip.reference, clientId: trip.clientId },
+      { category: delay.category, durationMinutes: delay.durationMinutes },
+    );
 
     return { success: true, delay };
   }

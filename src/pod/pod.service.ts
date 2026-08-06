@@ -74,6 +74,10 @@ export class PodService {
         deliveredAt,
         confirmedBy: user.userId,
         confirmedByRole: user.role,
+        // POD-04.1 — delivery geolocation (optional; null when the client couldn't capture it).
+        deliveredLat: dto.deliveredLat ?? null,
+        deliveredLng: dto.deliveredLng ?? null,
+        deliveredLocationAccuracy: dto.deliveredLocationAccuracy ?? null,
       },
       update: {
         ...(dto.recipientName !== undefined && {
@@ -81,6 +85,17 @@ export class PodService {
         }),
         ...(dto.notes !== undefined && { notes: dto.notes }),
         ...(dto.deliveredAt !== undefined && { deliveredAt }),
+        // POD-04.1 — only overwrite geolocation when the caller actually sends it
+        // (partial saves never clear an existing captured location).
+        ...(dto.deliveredLat !== undefined && {
+          deliveredLat: dto.deliveredLat,
+        }),
+        ...(dto.deliveredLng !== undefined && {
+          deliveredLng: dto.deliveredLng,
+        }),
+        ...(dto.deliveredLocationAccuracy !== undefined && {
+          deliveredLocationAccuracy: dto.deliveredLocationAccuracy,
+        }),
       },
     });
 

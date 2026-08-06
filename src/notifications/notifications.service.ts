@@ -1,5 +1,10 @@
-import { Injectable } from '@nestjs/common';
-import { NotificationType, Prisma, TripStatus } from '@prisma/client';
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  Notification,
+  NotificationType,
+  Prisma,
+  TripStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrackingGateway } from '../tracking/tracking.gateway';
 import { NotificationQueryDto } from './dto/notification-query.dto';
@@ -53,6 +58,8 @@ const TRIP_STATUS_NOTIFICATION: Partial<
  */
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(
     private prisma: PrismaService,
     private trackingGateway: TrackingGateway,
@@ -89,6 +96,65 @@ export class NotificationsService {
     });
   }
 
+  /**
+   * NOT-02.1 — a delay was *reported* against a trip (a human operational report,
+   * e.g. breakdown/traffic). Distinct copy from the ETA-derived alerts below, and
+   * fully independent of the ETA monitor's dedup state. Reuses TRIP_DELAYED (no new
+   * enum): the frontend renders title/message generically. Returns the created row
+   * (or null on failure) but the delay report never depends on it.
+   */
+  async onDelayReported(
+    trip: { id: string; reference: string; clientId: string },
+    detail: { category: string; durationMinutes: number },
+  ): Promise<Notification | null> {
+    const category = detail.category.toLowerCase().replace(/_/g, ' ');
+    const duration =
+      detail.durationMinutes > 0 ? ` (~${detail.durationMinutes} min)` : '';
+    return this.create({
+      type: NotificationType.TRIP_DELAYED,
+      title: 'Delay reported',
+      message: `A ${category} delay was reported for trip ${trip.reference}${duration}.`,
+      clientId: trip.clientId,
+      tripId: trip.id,
+    });
+  }
+
+  /**
+   * ETA-06.1 (A) — the ETA engine predicts arrival past schedule. Raised at most
+   * once per delay episode by the trips ETA monitor; returns the created row (or
+   * null) so the monitor can roll back its atomic claim on a persistence failure.
+   */
+  async onEtaDelay(
+    trip: { id: string; reference: string; clientId: string },
+    delayMinutes: number,
+  ): Promise<Notification | null> {
+    return this.create({
+      type: NotificationType.TRIP_DELAYED,
+      title: 'Trip delay detected',
+      message: `Trip ${trip.reference} is running ${delayMinutes} min past scheduled arrival.`,
+      clientId: trip.clientId,
+      tripId: trip.id,
+    });
+  }
+
+  /**
+   * ETA-06.1 (B) — the live ETA has drifted significantly *later* than the accepted
+   * baseline. Only later shifts notify (an earlier ETA is not a delay); raised once
+   * per re-baseline. Returns the created row (or null) for claim rollback.
+   */
+  async onEtaShift(
+    trip: { id: string; reference: string; clientId: string },
+    shiftMinutes: number,
+  ): Promise<Notification | null> {
+    return this.create({
+      type: NotificationType.TRIP_DELAYED,
+      title: 'Significant ETA shift',
+      message: `Trip ${trip.reference} ETA moved ${shiftMinutes} min later.`,
+      clientId: trip.clientId,
+      tripId: trip.id,
+    });
+  }
+
   /* ---------------------------------------------------------------- */
   /* Core                                                             */
   /* ---------------------------------------------------------------- */
@@ -96,7 +162,9 @@ export class NotificationsService {
   /**
    * Persist a notification and broadcast a refetch signal — the single writer used by
    * every trigger. Never throws into the caller's flow: a notification failure must not
-   * break the trip status change or POD confirmation that triggered it.
+   * break the trip status change or POD confirmation that triggered it. Returns the
+   * created row on success, or null on failure (logged) — the ETA monitor uses this to
+   * roll back its atomic claim; the status/POD triggers ignore it and are unaffected.
    */
   async create(data: {
     type: NotificationType;
@@ -104,7 +172,7 @@ export class NotificationsService {
     message: string;
     clientId: string;
     tripId?: string | null;
-  }): Promise<void> {
+  }): Promise<Notification | null> {
     try {
       const row = await this.prisma.notification.create({
         data: {
@@ -120,8 +188,16 @@ export class NotificationsService {
       this.trackingGateway.server.emit('notification:new', {
         clientId: row.clientId,
       });
-    } catch {
-      // Secondary to the domain action — swallow so the trigger site is never disrupted.
+      return row;
+    } catch (err) {
+      // Secondary to the domain action — swallow so the trigger site is never disrupted,
+      // but surface the failure to callers (null) and the log so it isn't silent.
+      this.logger.error(
+        `Failed to persist notification (${data.type}) for client ${data.clientId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
     }
   }
 

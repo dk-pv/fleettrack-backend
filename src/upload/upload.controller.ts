@@ -85,6 +85,7 @@ export class UploadController {
     return this.uploadService.store(req.user, {
       tripId: dto.tripId,
       category: dto.category,
+      costComponent: dto.costComponent,
       file: {
         buffer: file.buffer,
         originalName: file.originalname,
@@ -97,7 +98,12 @@ export class UploadController {
   @Roles('ADMIN', 'CLIENT')
   @Get()
   list(@Req() req: AuthedRequest, @Query() query: UploadQueryDto) {
-    return this.uploadService.list(req.user, query.tripId, query.category);
+    return this.uploadService.list(
+      req.user,
+      query.tripId,
+      query.category,
+      query.costComponent,
+    );
   }
 
   @Roles('ADMIN', 'CLIENT')

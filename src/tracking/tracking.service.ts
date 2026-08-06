@@ -91,7 +91,22 @@ export class TrackingService {
         try {
           this.logger.log(`Syncing vehicles for client: ${client.name}`);
 
-          const response = await fetch(client.apiUrl);
+          if (!client.apiUrl) {
+            this.logger.warn(
+              `Client API URL missing or invalid for client ${client.name}`,
+            );
+            continue;
+          }
+
+          let response;
+          try {
+            response = await fetch(client.apiUrl);
+          } catch (fetchError) {
+            this.logger.error(
+              `Failed to fetch API for client ${client.name} at ${client.apiUrl}: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
+            );
+            continue;
+          }
 
           if (!response.ok) {
             this.logger.error(
