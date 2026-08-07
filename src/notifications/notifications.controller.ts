@@ -28,7 +28,7 @@ interface AuthedRequest extends Request {
  */
 @Controller('notifications')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('ADMIN', 'CLIENT')
+@Roles('CLIENT')
 export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 

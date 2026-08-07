@@ -49,63 +49,63 @@ export class TripsController {
     return this.tripsService.create((req as any).user, dto);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get()
   findAll(@Req() req: Request, @Query('clientId') clientId?: string) {
     return this.tripsService.findAll((req as any).user, clientId);
   }
 
   // Must precede @Get(':id') so the ':id' route doesn't capture "overlap".
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('overlap')
   checkOverlap(@Req() req: Request, @Query() query: OverlapQueryDto) {
     return this.tripsService.checkOverlap((req as any).user, query);
   }
 
   // TM-10.1 driver lookup. Must precede @Get(':id') so ':id' can't capture "drivers".
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('drivers')
   listDrivers(@Req() req: AuthedRequest, @Query('clientId') clientId?: string) {
     return this.tripsService.listDrivers(req.user, clientId);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id')
   findOne(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.findOne((req as any).user, id);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/timeline')
   timeline(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getTimeline((req as any).user, id);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/progress')
   progress(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getProgress((req as any).user, id);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/eta')
   eta(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getEta((req as any).user, id);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/eta/stops')
   stopEtas(@Req() req: AuthedRequest, @Param('id') id: string) {
     return this.tripsService.getStopEtas(req.user, id);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/delay')
   delay(@Req() req: AuthedRequest, @Param('id') id: string) {
     return this.tripsService.getDelay(req.user, id);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/eta/alerts')
   etaAlerts(
     @Req() req: AuthedRequest,
@@ -115,7 +115,7 @@ export class TripsController {
     return this.tripsService.getEtaAlerts(req.user, id, query);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/breadcrumbs')
   breadcrumbs(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getBreadcrumbs((req as any).user, id);
@@ -177,13 +177,13 @@ export class TripsController {
 export class TripReportController {
   constructor(private readonly tripsService: TripsService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('summary')
   getSummary(@Req() req: AuthedRequest, @Query() query: TripReportQueryDto) {
     return this.tripsService.getSummaryReport(req.user, query);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('summary/export')
   async exportSummary(
     @Req() req: AuthedRequest,
@@ -211,7 +211,7 @@ export class TripReportController {
 export class DriverReportController {
   constructor(private readonly tripsService: TripsService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('performance')
   getPerformance(
     @Req() req: AuthedRequest,
@@ -220,7 +220,7 @@ export class DriverReportController {
     return this.tripsService.getDriverReport(req.user, query);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('performance/export')
   async exportPerformance(
     @Req() req: AuthedRequest,
@@ -249,7 +249,7 @@ export class DriverReportController {
 export class VehicleReportController {
   constructor(private readonly tripsService: TripsService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('utilization')
   getUtilization(
     @Req() req: AuthedRequest,
@@ -258,7 +258,7 @@ export class VehicleReportController {
     return this.tripsService.getVehicleReport(req.user, query);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('utilization/export')
   async exportUtilization(
     @Req() req: AuthedRequest,

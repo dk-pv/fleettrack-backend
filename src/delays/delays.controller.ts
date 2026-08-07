@@ -33,27 +33,27 @@ interface AuthedRequest extends Request {
 export class DelaysController {
   constructor(private readonly delaysService: DelaysService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Post()
   create(@Req() req: AuthedRequest, @Body() dto: CreateDelayDto) {
     return this.delaysService.create(req.user, dto);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get()
   findAll(@Req() req: AuthedRequest) {
     return this.delaysService.findAll(req.user);
   }
 
   /** Delay aggregation by category/driver/route/period (DLY-04.1). */
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('stats')
   getStats(@Req() req: AuthedRequest, @Query() query: DelayStatsQueryDto) {
     return this.delaysService.getStats(req.user, query);
   }
 
   /** Delay analysis report as a PDF (RPT-04.2) — reuses the getStats aggregation. */
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('stats/export')
   async exportStats(
     @Req() req: AuthedRequest,
@@ -76,7 +76,7 @@ export class DelaysController {
 export class TripDelaysController {
   constructor(private readonly delaysService: DelaysService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/delays')
   findByTrip(@Req() req: AuthedRequest, @Param('id') id: string) {
     return this.delaysService.findByTrip(req.user, id);

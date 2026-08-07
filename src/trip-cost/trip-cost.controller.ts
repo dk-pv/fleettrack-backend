@@ -33,7 +33,7 @@ interface AuthedRequest extends Request {
 export class TripCostController {
   constructor(private readonly tripCostService: TripCostService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get(':id/cost')
   getCost(@Req() req: AuthedRequest, @Param('id') id: string) {
     return this.tripCostService.getByTrip(req.user, id);
@@ -60,13 +60,13 @@ export class TripCostController {
 export class TripCostReportController {
   constructor(private readonly tripCostService: TripCostService) {}
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('report')
   getReport(@Req() req: AuthedRequest, @Query() query: CostReportQueryDto) {
     return this.tripCostService.getReport(req.user, query);
   }
 
-  @Roles('ADMIN', 'CLIENT')
+  @Roles('CLIENT')
   @Get('report/export')
   async exportReport(
     @Req() req: AuthedRequest,
