@@ -103,7 +103,7 @@ export class TrackingService {
             response = await fetch(client.apiUrl);
           } catch (fetchError) {
             this.logger.error(
-              `Failed to fetch API for client ${client.name} at ${client.apiUrl}: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
+              `Failed to fetch API for client ${client.name}: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
             );
             continue;
           }
@@ -243,13 +243,8 @@ export class TrackingService {
               }
             }
 
-            this.trackingGateway.server.emit(
-              'vehicleLocationUpdate',
-              {
-                ...updatedVehicle,
-                timestamp: Date.now(),
-              },
-            );
+            // Scoped delivery: only the owning client's room + admins (never global).
+            this.trackingGateway.emitVehicleUpdate(updatedVehicle);
           }
         } catch (clientError) {
           if (this.isTransientDbError(clientError)) {
@@ -305,13 +300,8 @@ export class TrackingService {
           },
         });
 
-        this.trackingGateway.server.emit(
-          'vehicleLocationUpdate',
-          {
-            ...updatedVehicle,
-            timestamp: Date.now(),
-          },
-        );
+        // Scoped delivery: only the owning client's room + admins (never global).
+        this.trackingGateway.emitVehicleUpdate(updatedVehicle);
 
         this.logger.warn(
           `Vehicle offline: ${vehicle.vehicleNumber}`,

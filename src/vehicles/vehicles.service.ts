@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -43,19 +44,27 @@ export class VehiclesService {
   };
 }
 
-  async findOne(id: string) {
+  async findOne(id: string, user: any) {
     const vehicle = await this.prisma.vehicle.findUnique({
       where: {
         id,
       },
+      // Only id + name — never the full Client row (which carries apiUrl + password hash).
       include: {
-        client: true,
+        client: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
       },
     });
 
     if (!vehicle) {
       throw new NotFoundException('Vehicle not found');
     }
+
+    this.assertVehicleReadable(vehicle.clientId, user);
 
     return {
       success: true,
@@ -63,7 +72,7 @@ export class VehiclesService {
     };
   }
 
-  async getVehicleHistory(id: string) {
+  async getVehicleHistory(id: string, user: any) {
     const vehicle = await this.prisma.vehicle.findUnique({
       where: {
         id,
@@ -73,6 +82,8 @@ export class VehiclesService {
     if (!vehicle) {
       throw new NotFoundException('Vehicle not found');
     }
+
+    this.assertVehicleReadable(vehicle.clientId, user);
 
     const raw = await this.prisma.vehicleLocationHistory.findMany({
       where: {
@@ -110,19 +121,26 @@ export class VehiclesService {
     };
   }
 
-  async generateVehicleReport(id: string) {
+  async generateVehicleReport(id: string, user: any) {
     const vehicle = await this.prisma.vehicle.findUnique({
       where: {
         id,
       },
+      // The report only prints the client name — select it, don't include the full row.
       include: {
-        client: true,
+        client: {
+          select: {
+            name: true,
+          },
+        },
       },
     });
 
     if (!vehicle) {
       throw new NotFoundException('Vehicle not found');
     }
+
+    this.assertVehicleReadable(vehicle.clientId, user);
 
     const doc = new PDFDocument({
       margin: 50,
@@ -154,7 +172,7 @@ export class VehiclesService {
       doc.text(`Driver Name: ${vehicle.driverName}`);
       doc.moveDown();
 
-      doc.text(`Client Name: ${vehicle.client.name}`);
+      doc.text(`Client Name: ${vehicle.client?.name ?? 'N/A'}`);
       doc.moveDown();
 
       doc.text(`GPS Device ID: ${vehicle.gpsDeviceId}`);
@@ -176,5 +194,19 @@ export class VehiclesService {
 
       doc.end();
     });
+  }
+
+  /**
+   * A CLIENT may read only a vehicle assigned to it (its clientId === the client's own id,
+   * which is `user.userId` in the JWT). ADMIN (and other staff) may read any vehicle.
+   * Mirrors the trip module's `assertReadable` ownership check.
+   */
+  private assertVehicleReadable(
+    vehicleClientId: string | null,
+    user: any,
+  ) {
+    if (user?.role === 'CLIENT' && vehicleClientId !== user.userId) {
+      throw new ForbiddenException('Not your vehicle');
+    }
   }
 }

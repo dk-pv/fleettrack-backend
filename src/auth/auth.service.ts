@@ -72,7 +72,9 @@ export class AuthService {
       accountType,
     });
 
-    const { password: _, ...safeAccount } =
+    // Strip BOTH the password hash and (for a Client) the apiUrl — the apiUrl encodes the
+    // provider GPS credential and must never reach the browser / localStorage.
+    const { password: _password, apiUrl: _apiUrl, ...safeAccount } =
       account;
 
     const normalizedUser = {

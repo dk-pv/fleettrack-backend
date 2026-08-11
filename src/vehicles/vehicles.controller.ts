@@ -126,15 +126,15 @@ export class VehiclesController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CLIENT', 'VIEWER')
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.vehiclesService.findOne(id);
+  findOne(@Param('id') id: string, @Req() req: Request) {
+    return this.vehiclesService.findOne(id, (req as any).user);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CLIENT', 'VIEWER')
   @Get(':id/history')
-  getVehicleHistory(@Param('id') id: string) {
-    return this.vehiclesService.getVehicleHistory(id);
+  getVehicleHistory(@Param('id') id: string, @Req() req: Request) {
+    return this.vehiclesService.getVehicleHistory(id, (req as any).user);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -142,10 +142,11 @@ export class VehiclesController {
   @Get(':id/report')
   async generateReport(
     @Param('id') id: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     const pdfBuffer =
-      await this.vehiclesService.generateVehicleReport(id);
+      await this.vehiclesService.generateVehicleReport(id, (req as any).user);
 
     res.set({
       'Content-Type': 'application/pdf',
