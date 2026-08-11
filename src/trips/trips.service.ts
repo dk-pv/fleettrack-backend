@@ -1342,6 +1342,11 @@ export class TripsService {
     // guarantee behind the form only listing the client's own customers.
     await this.assertOwnedCustomer(user.userId, dto.customerId);
 
+    // A linked vehicle must also belong to this client — otherwise the trip could
+    // attach another client's (or an unassigned) vehicle and leak its live
+    // position/ETA/breadcrumbs through the trip read endpoints.
+    await this.assertOwnedVehicle(user.userId, dto.vehicleId);
+
     // Reject double-booking of the vehicle/driver (409 VEHICLE_OVERLAP /
     // DRIVER_OVERLAP) — the server-side guarantee behind the client pre-check.
     await this.assertNoResourceOverlap(user.userId, {
@@ -1445,6 +1450,9 @@ export class TripsService {
 
     // A (re)linked customer must belong to this client (CUS-07.1).
     await this.assertOwnedCustomer(user.userId, dto.customerId);
+
+    // A (re)linked vehicle must also belong to this client (same ownership rule as create).
+    await this.assertOwnedVehicle(user.userId, dto.vehicleId);
 
     // TM-05.1: stops may only be edited before the trip starts.
     if (
@@ -1806,6 +1814,23 @@ export class TripsService {
       where: { id: customerId, clientId },
     });
     if (!customer) throw new BadRequestException('INVALID_CUSTOMER');
+  }
+
+  /**
+   * A trip may only be linked to a vehicle the client owns — otherwise a client could
+   * attach another client's (or an unassigned) vehicle and read its live position, ETA
+   * and breadcrumbs through the trip. No-op when no vehicle is being set or it's being
+   * cleared (null); throws 400 INVALID_VEHICLE otherwise. Mirrors assertOwnedCustomer.
+   */
+  private async assertOwnedVehicle(
+    clientId: string,
+    vehicleId?: string | null,
+  ) {
+    if (!vehicleId) return;
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, clientId },
+    });
+    if (!vehicle) throw new BadRequestException('INVALID_VEHICLE');
   }
 
   private async resolveActor(

@@ -12,7 +12,7 @@ model User {
   name      String
   email     String   @unique
   password  String
-  role      Role     @default(VIEWER)
+  role      Role     @default(ADMIN)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -36,7 +36,7 @@ model Vehicle {
   vehicleNumber      String
   gpsDeviceId        String
   driverName         String
-  clientId           String
+  clientId           String?
   status             VehicleStatus            @default(IDLE)
   latitude           Float                    @default(0)
   longitude          Float                    @default(0)
@@ -51,11 +51,13 @@ model Vehicle {
   lastSeenAt         DateTime?
   providerName       String?
   providerVehicleId  String?
-  client             Client                   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  imei               String?
+  client             Client?                  @relation(fields: [clientId], references: [id], onDelete: SetNull)
   locationHistory    VehicleLocationHistory[]
   trips              Trip[]
 
   @@unique([clientId, vehicleNumber])
+  @@unique([providerName, providerVehicleId])
 }
 
 model VehicleLocationHistory {
@@ -75,7 +77,6 @@ model VehicleLocationHistory {
 
 enum Role {
   ADMIN
-  VIEWER
 }
 
 enum VehicleStatus {
@@ -439,7 +440,7 @@ model Notification {
   @@index([createdAt])
 }
 
-// Password reset token (auth). Supports BOTH login principals — a User (ADMIN/VIEWER)
+// Password reset token (auth). Supports BOTH login principals — a User (ADMIN)
 // and a Client — which live in separate tables, so the account is keyed by email +
 // accountType rather than a relation. The raw token is emailed (or logged in dev); only
 // its SHA-256 hash is stored, so a database leak cannot be used to reset a password.
@@ -455,4 +456,27 @@ model PasswordResetToken {
 
   @@index([email])
   @@index([expiresAt])
+}
+
+enum GpsProviderName {
+  AIROTRACK
+  TRANSIGHT
+}
+
+// Backend-only GPS provider configuration. The credential (AiroTrack token /
+// Transight apikey) lives in `credential` and is NEVER serialized to any API,
+// socket, or log — read APIs return masked/metadata only; a write API sets it.
+// One row per provider (provider is unique).
+model GpsIntegration {
+  id              String          @id @default(cuid())
+  provider        GpsProviderName @unique
+  active          Boolean         @default(false)
+  baseUrl         String
+  system          String?
+  credential      String?
+  pollIntervalSec Int             @default(300)
+  lastSyncedAt    DateTime?
+  lastError       String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 }

@@ -11,9 +11,15 @@ import { Server, Socket } from 'socket.io';
 /** A live vehicle update payload — the full Vehicle row (shape unchanged for consumers). */
 type VehicleUpdate = Record<string, any> & { clientId?: string | null };
 
+// Socket CORS origin. Reuses the existing FRONTEND_URL env var (same one auth uses for
+// reset links), so production restricts to the real frontend origin instead of '*';
+// local dev falls back to localhost:3000. Set FRONTEND_URL in production.
+const SOCKET_CORS_ORIGIN =
+  process.env.FRONTEND_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
+
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: SOCKET_CORS_ORIGIN,
   },
 })
 export class TrackingGateway
@@ -34,8 +40,8 @@ export class TrackingGateway
    * Authenticate every socket on connect with the same JWT used for REST. A socket that
    * doesn't present a valid token is disconnected — no one receives vehicle telemetry
    * without proving identity. Authenticated sockets join a room by principal:
-   *   CLIENT       -> `client:<clientId>`  (its own vehicles only)
-   *   ADMIN / staff -> `admins`            (centralized fleet)
+   *   CLIENT -> `client:<clientId>`  (its own vehicles only)
+   *   ADMIN  -> `admins`             (centralized fleet)
    * Vehicle updates are then emitted per-room (see emitVehicleUpdate), never globally.
    */
   handleConnection(client: Socket) {
@@ -60,9 +66,8 @@ export class TrackingGateway
       if (role === 'CLIENT') {
         client.data.user = { userId, role };
         client.join(`client:${userId}`);
-      } else if (role === 'ADMIN' || role === 'VIEWER') {
-        // Staff see the centralized fleet (matches their REST access). VIEWER is handled
-        // here only to preserve current behaviour — role removal is a later phase.
+      } else if (role === 'ADMIN') {
+        // ADMIN sees the centralized fleet (matches their REST access).
         client.data.user = { userId, role };
         client.join('admins');
       } else {

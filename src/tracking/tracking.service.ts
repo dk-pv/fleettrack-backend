@@ -1,8 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { Vehicle, TripStatus, VehicleStatus } from '@prisma/client';
+
 import { PrismaService } from '../prisma/prisma.service';
 import { TrackingGateway } from './tracking.gateway';
-import { TripStatus, VehicleStatus } from '@prisma/client';
+import { GpsIntegrationService } from '../gps/gps-integration.service';
+import { NormalizedPosition } from '../gps/gps-provider.interface';
 
 function haversineDistance(
   lat1: number,
@@ -66,9 +69,14 @@ const ACTIVE_TRIP_STATUSES: TripStatus[] = [
 export class TrackingService {
   private readonly logger = new Logger(TrackingService.name);
 
+  // Reentrancy guard — a single poller. If a tick is still running (slow provider
+  // or DB), the next @Cron tick is skipped rather than starting a second sync.
+  private isSyncing = false;
+
   constructor(
     private prisma: PrismaService,
     private trackingGateway: TrackingGateway,
+    private gpsIntegration: GpsIntegrationService,
   ) {}
 
   /**
@@ -81,198 +89,206 @@ export class TrackingService {
     return code === 'P1001' || code === 'P1002' || code === 'P1017';
   }
 
-  // Every 60s (was 20s) — gentler on the serverless DB, less cold-start churn.
+  private deriveStatus(ignition: boolean, speed: number): VehicleStatus {
+    if (ignition && speed > 0) return 'MOVING';
+    if (ignition && speed <= 0) return 'IDLE';
+    return 'OFFLINE';
+  }
+
+  /**
+   * Poll every active GPS provider that is due (per-provider cadence, so Transight's
+   * ~5-min bulk stays under its 500/day limit while AiroTrack can poll every minute),
+   * normalize positions through the provider adapters, and upsert into the shared
+   * vehicle inventory. A provider sync NEVER assigns a vehicle to a client: new
+   * vehicles land as unassigned inventory (clientId = null); existing vehicles keep
+   * their clientId untouched.
+   */
   @Cron('0 * * * * *')
   async syncVehicles() {
+    if (this.isSyncing) {
+      this.logger.warn('Previous sync still running — skipping this tick');
+      return;
+    }
+    this.isSyncing = true;
+
     try {
-      const clients = await this.prisma.client.findMany();
+      const providers = await this.gpsIntegration.getActiveProviders();
 
-      for (const client of clients) {
+      for (const { config, provider } of providers) {
+        const dueMs = (config.pollIntervalSec ?? 300) * 1000;
+        const last = config.lastSyncedAt ? config.lastSyncedAt.getTime() : 0;
+        if (Date.now() - last < dueMs) continue; // not due yet (rate-limit cadence)
+
         try {
-          this.logger.log(`Syncing vehicles for client: ${client.name}`);
-
-          if (!client.apiUrl) {
-            this.logger.warn(
-              `Client API URL missing or invalid for client ${client.name}`,
-            );
-            continue;
-          }
-
-          let response;
-          try {
-            response = await fetch(client.apiUrl);
-          } catch (fetchError) {
-            this.logger.error(
-              `Failed to fetch API for client ${client.name}: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
-            );
-            continue;
-          }
-
-          if (!response.ok) {
-            this.logger.error(
-              `API failed for client ${client.name}: ${response.status}`,
-            );
-            continue;
-          }
-
-          const data = (await response.json()) as any[];
-
-          for (const item of data) {
-            const vehicleNumber = item.vehicleNumber;
-            const lat = item.lat || 0;
-            const lng = item.long || 0;
-
-            let status: VehicleStatus = 'OFFLINE';
-
-            if (item.ignition && item.speed > 0) {
-              status = 'MOVING';
-            } else if (item.ignition && item.speed <= 0) {
-              status = 'IDLE';
-            }
-
-            let vehicle = await this.prisma.vehicle.findFirst({
-              where: {
-                clientId: client.id,
-                vehicleNumber,
-              },
-            });
-
-            if (!vehicle) {
-              vehicle = await this.prisma.vehicle.create({
-                data: {
-                  vehicleName: vehicleNumber,
-                  vehicleNumber,
-                  gpsDeviceId: vehicleNumber,
-                  providerName: 'airotrack',
-                  providerVehicleId: vehicleNumber,
-                  driverName: 'Unknown Driver',
-                  clientId: client.id,
-                  ignition: item.ignition || false,
-                  batteryVoltage: item.power || 0,
-                  charge: item.charge || false,
-                  isOnline: true,
-                  status,
-                  latitude: lat,
-                  longitude: lng,
-                  speed: item.speed || 0,
-                  lastSeenAt: new Date(),
-                  lastProviderUpdate: new Date(item.last_updated),
-                },
-              });
-
-              this.logger.log(
-                `Created vehicle ${vehicleNumber} for ${client.name}`,
-              );
-
-              continue;
-            }
-
-            const updatedVehicle = await this.prisma.vehicle.update({
-              where: {
-                id: vehicle.id,
-              },
-              data: {
-                ignition: item.ignition || false,
-                batteryVoltage: item.power || 0,
-                charge: item.charge || false,
-                isOnline: true,
-                status,
-                latitude: lat,
-                longitude: lng,
-                speed: item.speed || 0,
-                lastSeenAt: new Date(),
-                lastProviderUpdate: new Date(item.last_updated),
-              },
-            });
-
-            if (isValidCoord(lat, lng)) {
-              const lastHistory =
-                await this.prisma.vehicleLocationHistory.findFirst({
-                  where: {
-                    vehicleId: updatedVehicle.id,
-                  },
-                  orderBy: {
-                    createdAt: 'desc',
-                  },
-                });
-
-              let shouldSave = true;
-              let heading = 0;
-
-              if (lastHistory) {
-                const dist = haversineDistance(
-                  lastHistory.latitude,
-                  lastHistory.longitude,
-                  lat,
-                  lng,
-                );
-
-                if (dist < MIN_SAVE_DISTANCE_METERS) {
-                  shouldSave = false;
-                } else {
-                  heading = calculateBearing(
-                    lastHistory.latitude,
-                    lastHistory.longitude,
-                    lat,
-                    lng,
-                  );
-                }
-              }
-
-              if (shouldSave) {
-                await this.prisma.vehicleLocationHistory.create({
-                  data: {
-                    vehicleId: updatedVehicle.id,
-                    latitude: lat,
-                    longitude: lng,
-                    speed: item.speed || 0,
-                    ignition: item.ignition || false,
-                    heading,
-                  },
-                });
-
-                // Append a breadcrumb to any trip this vehicle is actively
-                // running, reusing the same 10m movement filter + heading above
-                // (no duplicate GPS logic).
-                await this.recordTripBreadcrumbs(updatedVehicle.id, {
-                  lat,
-                  lng,
-                  speed: item.speed || 0,
-                  heading,
-                });
-              }
-            }
-
-            // Scoped delivery: only the owning client's room + admins (never global).
-            this.trackingGateway.emitVehicleUpdate(updatedVehicle);
-          }
-        } catch (clientError) {
-          if (this.isTransientDbError(clientError)) {
-            this.logger.warn(
-              `DB temporarily unreachable while syncing ${client.name} — skipping`,
-            );
-            continue;
-          }
-          this.logger.error(
-            `Client sync failed: ${client.name}`,
-            clientError instanceof Error
-              ? clientError.stack
-              : String(clientError),
+          const positions = await provider.getLatestPositions();
+          this.logger.log(
+            `Provider ${config.provider}: ${positions.length} positions`,
           );
+
+          for (const pos of positions) {
+            await this.upsertPosition(pos);
+          }
+
+          await this.gpsIntegration.markSynced(config.provider, null);
+        } catch (providerError) {
+          if (this.isTransientDbError(providerError)) {
+            this.logger.warn(
+              `DB temporarily unreachable while syncing ${config.provider} — skipping`,
+            );
+            continue;
+          }
+          const msg =
+            providerError instanceof Error
+              ? providerError.message
+              : String(providerError);
+          this.logger.error(`Provider ${config.provider} sync failed: ${msg}`);
+          await this.gpsIntegration.markSynced(config.provider, msg);
         }
       }
     } catch (error) {
       if (this.isTransientDbError(error)) {
-        this.logger.warn(
-          'DB temporarily unreachable — skipping this sync tick',
-        );
+        this.logger.warn('DB temporarily unreachable — skipping this sync tick');
         return;
       }
       this.logger.error(
         'Vehicle sync failed',
         error instanceof Error ? error.stack : String(error),
       );
+    } finally {
+      this.isSyncing = false;
     }
+  }
+
+  /**
+   * Insert a new (unassigned) vehicle or update an existing one, keyed by provider
+   * identity (providerName + providerVehicleId) — NOT by clientId, so assignment is
+   * preserved. Records location history + trip breadcrumbs and broadcasts the update
+   * (scoped: owning client's room + admins; unassigned → admins only).
+   */
+  private async upsertPosition(pos: NormalizedPosition): Promise<void> {
+    const status = this.deriveStatus(pos.ignition, pos.speed);
+
+    const existing = await this.prisma.vehicle.findFirst({
+      where: {
+        providerName: pos.providerName,
+        providerVehicleId: pos.providerVehicleId,
+      },
+    });
+
+    if (!existing) {
+      const created = await this.prisma.vehicle.create({
+        data: {
+          vehicleName: pos.vehicleNumber,
+          vehicleNumber: pos.vehicleNumber,
+          gpsDeviceId: pos.gpsDeviceId ?? pos.vehicleNumber,
+          providerName: pos.providerName,
+          providerVehicleId: pos.providerVehicleId,
+          imei: pos.imei ?? null,
+          driverName: 'Unknown Driver',
+          clientId: null, // unassigned global inventory — never auto-assigned
+          ignition: pos.ignition,
+          batteryVoltage: pos.batteryVoltage ?? undefined,
+          charge: pos.charge ?? undefined,
+          isOnline: true,
+          status,
+          latitude: pos.latitude,
+          longitude: pos.longitude,
+          speed: pos.speed,
+          lastSeenAt: new Date(),
+          lastProviderUpdate: pos.providerTimestamp ?? new Date(),
+        },
+      });
+
+      this.logger.log(
+        `New unassigned inventory vehicle ${pos.vehicleNumber} (${pos.providerName})`,
+      );
+      this.trackingGateway.emitVehicleUpdate(created);
+      return;
+    }
+
+    const updated = await this.prisma.vehicle.update({
+      where: { id: existing.id },
+      // Position/telemetry only — clientId is deliberately absent so assignment is
+      // never changed by a sync. Transight lacks battery/charge → undefined = no-op.
+      data: {
+        ignition: pos.ignition,
+        batteryVoltage: pos.batteryVoltage ?? undefined,
+        charge: pos.charge ?? undefined,
+        imei: pos.imei ?? existing.imei ?? undefined,
+        isOnline: true,
+        status,
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        speed: pos.speed,
+        lastSeenAt: new Date(),
+        lastProviderUpdate: pos.providerTimestamp ?? new Date(),
+      },
+    });
+
+    await this.recordHistoryAndBreadcrumbs(updated, pos);
+
+    // Scoped delivery: only the owning client's room + admins (never global).
+    this.trackingGateway.emitVehicleUpdate(updated);
+  }
+
+  /**
+   * Persist a location-history point (with computed heading) and a trip breadcrumb,
+   * gated by the same 10m movement filter as before. Unchanged logic, just factored
+   * out of the sync loop so both providers reuse it.
+   */
+  private async recordHistoryAndBreadcrumbs(
+    vehicle: Vehicle,
+    pos: NormalizedPosition,
+  ): Promise<void> {
+    if (!isValidCoord(pos.latitude, pos.longitude)) return;
+
+    const lastHistory = await this.prisma.vehicleLocationHistory.findFirst({
+      where: { vehicleId: vehicle.id },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let shouldSave = true;
+    let heading = 0;
+
+    if (lastHistory) {
+      const dist = haversineDistance(
+        lastHistory.latitude,
+        lastHistory.longitude,
+        pos.latitude,
+        pos.longitude,
+      );
+
+      if (dist < MIN_SAVE_DISTANCE_METERS) {
+        shouldSave = false;
+      } else {
+        heading = calculateBearing(
+          lastHistory.latitude,
+          lastHistory.longitude,
+          pos.latitude,
+          pos.longitude,
+        );
+      }
+    }
+
+    if (!shouldSave) return;
+
+    await this.prisma.vehicleLocationHistory.create({
+      data: {
+        vehicleId: vehicle.id,
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        speed: pos.speed,
+        ignition: pos.ignition,
+        heading,
+      },
+    });
+
+    await this.recordTripBreadcrumbs(vehicle.id, {
+      lat: pos.latitude,
+      lng: pos.longitude,
+      speed: pos.speed,
+      heading,
+    });
   }
 
   @Cron('0 */1 * * * *')
@@ -303,9 +319,7 @@ export class TrackingService {
         // Scoped delivery: only the owning client's room + admins (never global).
         this.trackingGateway.emitVehicleUpdate(updatedVehicle);
 
-        this.logger.warn(
-          `Vehicle offline: ${vehicle.vehicleNumber}`,
-        );
+        this.logger.warn(`Vehicle offline: ${vehicle.vehicleNumber}`);
       }
     } catch (error) {
       if (this.isTransientDbError(error)) {

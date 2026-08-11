@@ -10,12 +10,17 @@ import { PrismaService } from '../prisma/prisma.service';
 export class VehiclesService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(user: any, selectedClientId?: string) {
+  async findAll(user: any, selectedClientId?: string, assignment?: string) {
   let where: any = {};
 
   // ADMIN selected specific client
   if (user.role === 'ADMIN' && selectedClientId) {
     where.clientId = selectedClientId;
+  }
+
+  // ADMIN requesting only unassigned inventory (for client-creation vehicle selection).
+  if (user.role === 'ADMIN' && assignment === 'unassigned') {
+    where.clientId = null;
   }
 
   // CLIENT login

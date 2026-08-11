@@ -183,11 +183,16 @@ export class NotificationsService {
           tripId: data.tripId ?? null,
         },
       });
-      // Lightweight signal only (no content on the broadcast): scoped clients refetch the
-      // auth-protected list. Reuses the shared tracking socket — no new gateway.
-      this.trackingGateway.server.emit('notification:new', {
-        clientId: row.clientId,
-      });
+      // Lightweight signal only (no content in the event): the client refetches the
+      // auth-protected list. Emitted ONLY to the owning client's room (never globally),
+      // so one tenant can't observe another tenant's notification activity. Reuses the
+      // shared tracking socket — no new gateway. (Admin-audience notifications arrive with
+      // TripRequest in a later phase and will target the `admins` room.)
+      this.trackingGateway.server
+        .to(`client:${row.clientId}`)
+        .emit('notification:new', {
+          clientId: row.clientId,
+        });
       return row;
     } catch (err) {
       // Secondary to the domain action — swallow so the trigger site is never disrupted,
