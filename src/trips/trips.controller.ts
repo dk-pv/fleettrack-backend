@@ -43,7 +43,10 @@ interface AuthedRequest extends Request {
 export class TripsController {
   constructor(private readonly tripsService: TripsService) {}
 
-  @Roles('CLIENT')
+  // CLIENT creates its own trip; ADMIN creates directly on behalf of a selected client
+  // (dto.clientId, validated in the service). Ownership/overlap are enforced server-side
+  // against the resolved owner — the frontend selection is never trusted.
+  @Roles('CLIENT', 'ADMIN')
   @Post()
   create(@Req() req: Request, @Body() dto: CreateTripDto) {
     return this.tripsService.create((req as any).user, dto);
@@ -56,14 +59,16 @@ export class TripsController {
   }
 
   // Must precede @Get(':id') so the ':id' route doesn't capture "overlap".
-  @Roles('CLIENT')
+  // ADMIN scopes to a selected client (query clientId); CLIENT stays JWT-scoped.
+  @Roles('CLIENT', 'ADMIN')
   @Get('overlap')
   checkOverlap(@Req() req: Request, @Query() query: OverlapQueryDto) {
     return this.tripsService.checkOverlap((req as any).user, query);
   }
 
   // TM-10.1 driver lookup. Must precede @Get(':id') so ':id' can't capture "drivers".
-  @Roles('CLIENT')
+  // ADMIN lists a selected client's drivers (query clientId); CLIENT stays JWT-scoped.
+  @Roles('CLIENT', 'ADMIN')
   @Get('drivers')
   listDrivers(@Req() req: AuthedRequest, @Query('clientId') clientId?: string) {
     return this.tripsService.listDrivers(req.user, clientId);

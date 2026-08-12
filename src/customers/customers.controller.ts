@@ -49,9 +49,14 @@ export class CustomersController {
     return this.customersService.create(this.clientId(req), dto);
   }
 
+  // The only customer endpoint an ADMIN may reach: list a SELECTED client's customers (for
+  // ADMIN direct trip creation). CLIENT stays own-scoped. All other routes keep the
+  // class-level CLIENT-only rule. The effective client is resolved server-side in the
+  // service (CLIENT: JWT; ADMIN: validated ?clientId) — never trusted from the query alone.
+  @Roles('CLIENT', 'ADMIN')
   @Get()
-  findAll(@Req() req: Request) {
-    return this.customersService.findAll(this.clientId(req));
+  findAll(@Req() req: AuthedRequest, @Query('clientId') clientId?: string) {
+    return this.customersService.findAll(req.user, clientId);
   }
 
   @Get(':id')

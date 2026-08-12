@@ -1279,8 +1279,21 @@ export class TripsService {
       return { success: true, hasOverlap: false, conflicts: [] };
     }
 
+    // Scope: a CLIENT is pinned to its own trips (query clientId ignored — no cross-tenant
+    // read). An ADMIN scopes to the selected client; with no client selected it does not
+    // scan across clients (advisory pre-check — trip creation is the authoritative guard).
+    let scopeClientId: string | undefined;
+    if (user.role === 'CLIENT') {
+      scopeClientId = user.userId;
+    } else {
+      if (!query.clientId) {
+        return { success: true, hasOverlap: false, conflicts: [] };
+      }
+      scopeClientId = query.clientId;
+    }
+
     const conflicts = await this.findOverlapConflicts({
-      clientId: user.role === 'CLIENT' ? user.userId : undefined,
+      clientId: scopeClientId,
       vehicleId: query.vehicleId,
       driverId: query.driverId,
       start,
@@ -1307,12 +1320,15 @@ export class TripsService {
    * collapsing (over-matching) is the fail-safe direction.
    */
   async listDrivers(user: AuthUser, clientId?: string) {
-    const where: Prisma.VehicleWhereInput =
-      user.role === 'CLIENT'
-        ? { clientId: user.userId }
-        : clientId
-          ? { clientId }
-          : {};
+    // CLIENT sees its own drivers (query clientId ignored — no cross-tenant read). ADMIN
+    // must target a selected client, resolved + validated exactly like trip creation, so it
+    // never returns all clients' drivers and can't be pointed at a non-existent client.
+    const where: Prisma.VehicleWhereInput = {
+      clientId:
+        user.role === 'CLIENT'
+          ? user.userId
+          : await this.resolveAdminTargetClient(clientId),
+    };
 
     const vehicles = await this.prisma.vehicle.findMany({
       where,
@@ -1338,18 +1354,28 @@ export class TripsService {
   /* ---------------------------------------------------------------- */
 
   async create(user: AuthUser, dto: CreateTripDto) {
-    // A linked customer must belong to this client (CUS-07.1) — the server-side
-    // guarantee behind the form only listing the client's own customers.
-    await this.assertOwnedCustomer(user.userId, dto.customerId);
+    // Resolve the owning client. A CLIENT always owns its own trips (userId IS the Client
+    // id); any clientId in the body is ignored. An ADMIN creates on behalf of a selected
+    // client, so the owner comes from dto.clientId — but only after validating that Client
+    // exists (so an invalid id can't reach a DB FK failure), and every ownership/overlap
+    // check below then runs against that real target.
+    const ownerClientId =
+      user.role === 'ADMIN'
+        ? await this.resolveAdminTargetClient(dto.clientId)
+        : user.userId;
 
-    // A linked vehicle must also belong to this client — otherwise the trip could
+    // A linked customer must belong to the owning client (CUS-07.1) — the server-side
+    // guarantee behind the form only listing that client's own customers.
+    await this.assertOwnedCustomer(ownerClientId, dto.customerId);
+
+    // A linked vehicle must also belong to the owning client — otherwise the trip could
     // attach another client's (or an unassigned) vehicle and leak its live
     // position/ETA/breadcrumbs through the trip read endpoints.
-    await this.assertOwnedVehicle(user.userId, dto.vehicleId);
+    await this.assertOwnedVehicle(ownerClientId, dto.vehicleId);
 
     // Reject double-booking of the vehicle/driver (409 VEHICLE_OVERLAP /
-    // DRIVER_OVERLAP) — the server-side guarantee behind the client pre-check.
-    await this.assertNoResourceOverlap(user.userId, {
+    // DRIVER_OVERLAP) — scoped to the owning client, matching the client pre-check.
+    await this.assertNoResourceOverlap(ownerClientId, {
       vehicleId: dto.vehicleId,
       driverId: dto.driverId,
       start: new Date(dto.scheduledStart),
@@ -1395,7 +1421,7 @@ export class TripsService {
           data: {
             reference,
             status: initialStatus,
-            clientId: user.userId, // owner is always the authenticated client
+            clientId: ownerClientId, // CLIENT: self (JWT); ADMIN: the validated selected client
             vehicleId: dto.vehicleId ?? null,
             driverId: dto.driverId ?? null,
             driverName: dto.driverName ?? null,
@@ -1845,6 +1871,28 @@ export class TripsService {
   ) {
     await this.assertOwnedCustomer(user.userId, resources.customerId);
     await this.assertOwnedVehicle(user.userId, resources.vehicleId);
+  }
+
+  /**
+   * Resolve + validate the target client for an ADMIN direct trip creation. The owner is
+   * taken from the request body (dto.clientId) but trusted only after confirming the
+   * Client exists — a missing/unknown id fails as a clean 400 (never a DB FK error), and
+   * all downstream ownership/overlap checks then run against a real client. CLIENT callers
+   * never reach this (they own their own trips via the JWT).
+   */
+  private async resolveAdminTargetClient(
+    clientId?: string | null,
+  ): Promise<string> {
+    const id = typeof clientId === 'string' ? clientId.trim() : '';
+    if (!id) throw new BadRequestException('CLIENT_REQUIRED');
+
+    const client = await this.prisma.client.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!client) throw new BadRequestException('INVALID_CLIENT');
+
+    return client.id;
   }
 
   private async resolveActor(

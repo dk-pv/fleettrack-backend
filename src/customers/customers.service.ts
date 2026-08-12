@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { AddressKind, Prisma, TripStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
@@ -57,13 +61,38 @@ export class CustomersService {
     return { success: true, customer };
   }
 
-  async findAll(clientId: string) {
+  async findAll(user: { userId: string; role: string }, queryClientId?: string) {
+    const clientId = await this.resolveEffectiveClientId(user, queryClientId);
     const customers = await this.prisma.customer.findMany({
       where: { clientId },
       orderBy: { createdAt: 'desc' },
     });
 
     return { success: true, customers };
+  }
+
+  /**
+   * Effective owning client for a customer list. A CLIENT is always its own client (any
+   * ?clientId is ignored — no cross-tenant read). An ADMIN must pass a target ?clientId,
+   * validated to exist, so a missing id is a clean 400 (CLIENT_REQUIRED) and an unknown one
+   * a clean 400 (INVALID_CLIENT) rather than silently returning all/empty customers.
+   */
+  private async resolveEffectiveClientId(
+    user: { userId: string; role: string },
+    queryClientId?: string,
+  ): Promise<string> {
+    if (user.role === 'CLIENT') return user.userId;
+
+    const id = typeof queryClientId === 'string' ? queryClientId.trim() : '';
+    if (!id) throw new BadRequestException('CLIENT_REQUIRED');
+
+    const client = await this.prisma.client.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!client) throw new BadRequestException('INVALID_CLIENT');
+
+    return client.id;
   }
 
   async findOne(clientId: string, id: string) {
