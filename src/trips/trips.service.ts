@@ -1833,6 +1833,20 @@ export class TripsService {
     if (!vehicle) throw new BadRequestException('INVALID_VEHICLE');
   }
 
+  /**
+   * Public reuse hook for the Trip Request workflow: validate that the customer and
+   * vehicle a CLIENT wants to put on a (future) trip belong to that client, using the
+   * exact same private checks create()/update() run — so a trip request and a direct
+   * trip enforce ownership identically. `user.userId` is the owning client id (CLIENT).
+   */
+  async assertOwnedTripResources(
+    user: AuthUser,
+    resources: { customerId?: string | null; vehicleId?: string | null },
+  ) {
+    await this.assertOwnedCustomer(user.userId, resources.customerId);
+    await this.assertOwnedVehicle(user.userId, resources.vehicleId);
+  }
+
   private async resolveActor(
     user: AuthUser,
   ): Promise<{ role: string; name: string | null }> {

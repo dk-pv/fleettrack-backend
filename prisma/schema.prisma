@@ -28,6 +28,7 @@ model Client {
   vehicles  Vehicle[]
   trips     Trip[]
   customers Customer[]
+  tripRequests TripRequest[]
 }
 
 model Vehicle {
@@ -423,17 +424,24 @@ enum NotificationType {
   TRIP_DELAYED
   TRIP_COMPLETED
   POD_UPLOADED
+  TRIP_REQUESTED
+  TRIP_REQUEST_APPROVED
+  TRIP_REQUEST_REJECTED
 }
 
 model Notification {
-  id        String           @id @default(cuid())
-  type      NotificationType
-  title     String
-  message   String
-  clientId  String
-  tripId    String?
-  read      Boolean          @default(false)
-  createdAt DateTime         @default(now())
+  id      String           @id @default(cuid())
+  type    NotificationType
+  title   String
+  message String
+  // Audience: a non-null clientId is a client-specific notification (that client only);
+  // a null clientId is an ADMIN-audience notification (Trip Request workflow). Scoped
+  // reads honour this — CLIENT: {clientId: self}, ADMIN: {clientId: null}.
+  clientId       String?
+  tripId         String?
+  tripRequestId  String?
+  read           Boolean          @default(false)
+  createdAt      DateTime         @default(now())
 
   @@index([clientId])
   @@index([clientId, read])
@@ -479,4 +487,55 @@ model GpsIntegration {
   lastError       String?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
+}
+
+enum TripRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// A client-submitted trip proposal awaiting admin approval (Trip Request + Approval
+// workflow). It stores the full trip-create payload so an approved request rebuilds the
+// exact CreateTripDto and reuses TripsService.create() — no separate creation path. No
+// Trip exists until approval (tripId is set then). `stops` is the raw ordered stop array
+// as JSON (not a child table — a request is transient). `reviewedById` is the ADMIN
+// (User) who approved/rejected. Deleting the owning client cascades its requests.
+model TripRequest {
+  id     String            @id @default(cuid())
+  status TripRequestStatus @default(PENDING)
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  // Trip payload snapshot — rebuilt into a CreateTripDto on approval.
+  reference      String?
+  vehicleId      String?
+  driverId       String?
+  driverName     String?
+  customerId     String?
+  origin         String
+  destination    String
+  originLat      Float?
+  originLng      Float?
+  destinationLat Float?
+  destinationLng Float?
+  stops          Json?
+  distanceKm     Float?
+  durationMins   Int?
+  notes          String?
+  scheduledStart DateTime
+  scheduledEnd   DateTime
+
+  // Set on approval (the created Trip); review metadata set on approve/reject.
+  tripId          String?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([status])
 }

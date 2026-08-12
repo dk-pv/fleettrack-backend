@@ -18,5 +18,6 @@ import { NotificationsModule } from '../notifications/notifications.module';
     VehicleReportController,
   ],
   providers: [TripsService],
+  exports: [TripsService],
 })
 export class TripsModule {}

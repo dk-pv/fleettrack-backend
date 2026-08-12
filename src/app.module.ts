@@ -17,6 +17,7 @@ import { PodModule } from './pod/pod.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { MailModule } from './mail/mail.module';
 import { GpsModule } from './gps/gps.module';
+import { TripRequestsModule } from './trip-requests/trip-requests.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { GpsModule } from './gps/gps.module';
     PodModule,
     NotificationsModule,
     GpsModule,
+    TripRequestsModule,
   ],
 })
 export class AppModule {}

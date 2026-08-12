@@ -22,13 +22,14 @@ interface AuthedRequest extends Request {
 
 /**
  * In-portal notification API (NOT-04.2 / NOT-04.3). Read + mark-read for the operations
- * roles (ADMIN, CLIENT); the list is ownership-scoped in the service (CLIENT own, ADMIN
- * all). Reuses the shared JWT + roles guards. Notifications are raised by domain triggers
- * (Trip / POD), never created here.
+ * roles (ADMIN, CLIENT); the list is audience-scoped in the service (CLIENT sees its own,
+ * ADMIN sees only admin-audience notifications — clientId null). Reuses the shared JWT +
+ * roles guards. Notifications are raised by domain triggers (Trip / POD / TripRequest),
+ * never created here.
  */
 @Controller('notifications')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('CLIENT')
+@Roles('ADMIN', 'CLIENT')
 export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 

@@ -85,6 +85,66 @@ export class NotificationsService {
     });
   }
 
+  /**
+   * A CLIENT submitted a trip request (Slice 2). ADMIN-audience: clientId is null so it
+   * is delivered to admins only (never to a client). Links the request for the review UI.
+   */
+  async onTripRequested(request: {
+    id: string;
+    clientId: string;
+    origin: string;
+    destination: string;
+  }): Promise<Notification | null> {
+    return this.create({
+      type: NotificationType.TRIP_REQUESTED,
+      title: 'New trip request',
+      message: `New trip request: ${request.origin} → ${request.destination}.`,
+      clientId: null, // ADMIN audience
+      tripRequestId: request.id,
+    });
+  }
+
+  /**
+   * A trip request was approved and its Trip created (Slice 2). Targets the requesting
+   * CLIENT only; carries both the request and the created trip for deep-linking.
+   */
+  async onTripRequestApproved(
+    request: { id: string; clientId: string; origin: string; destination: string },
+    tripId: string,
+  ): Promise<Notification | null> {
+    return this.create({
+      type: NotificationType.TRIP_REQUEST_APPROVED,
+      title: 'Trip request approved',
+      message: `Your trip request (${request.origin} → ${request.destination}) was approved.`,
+      clientId: request.clientId,
+      tripId,
+      tripRequestId: request.id,
+    });
+  }
+
+  /**
+   * A trip request was rejected (Slice 2). Targets the requesting CLIENT only; no Trip
+   * exists, so tripId is left null. The admin's reason is included for context.
+   */
+  async onTripRequestRejected(request: {
+    id: string;
+    clientId: string;
+    origin: string;
+    destination: string;
+    rejectionReason: string | null;
+  }): Promise<Notification | null> {
+    const reason = request.rejectionReason
+      ? ` Reason: ${request.rejectionReason}`
+      : '';
+    return this.create({
+      type: NotificationType.TRIP_REQUEST_REJECTED,
+      title: 'Trip request rejected',
+      message: `Your trip request (${request.origin} → ${request.destination}) was rejected.${reason}`,
+      clientId: request.clientId,
+      tripRequestId: request.id,
+    });
+  }
+
   /** React to a proof-of-delivery confirmation (NOT-04.1). */
   async onPodConfirmed(trip: TripRef): Promise<void> {
     await this.create({
@@ -170,8 +230,9 @@ export class NotificationsService {
     type: NotificationType;
     title: string;
     message: string;
-    clientId: string;
+    clientId: string | null;
     tripId?: string | null;
+    tripRequestId?: string | null;
   }): Promise<Notification | null> {
     try {
       const row = await this.prisma.notification.create({
@@ -179,20 +240,20 @@ export class NotificationsService {
           type: data.type,
           title: data.title,
           message: data.message,
-          clientId: data.clientId,
+          clientId: data.clientId ?? null,
           tripId: data.tripId ?? null,
+          tripRequestId: data.tripRequestId ?? null,
         },
       });
-      // Lightweight signal only (no content in the event): the client refetches the
-      // auth-protected list. Emitted ONLY to the owning client's room (never globally),
-      // so one tenant can't observe another tenant's notification activity. Reuses the
-      // shared tracking socket — no new gateway. (Admin-audience notifications arrive with
-      // TripRequest in a later phase and will target the `admins` room.)
-      this.trackingGateway.server
-        .to(`client:${row.clientId}`)
-        .emit('notification:new', {
-          clientId: row.clientId,
-        });
+      // Lightweight signal only (no content on the wire): the recipient refetches the
+      // auth-protected list. Routed by audience (D2): a client-scoped notification goes
+      // ONLY to that client's room; an admin-audience one (clientId null) goes to the
+      // `admins` room. Never global, so one tenant can't observe another's activity.
+      // Reuses the shared tracking socket — no new gateway.
+      const room = row.clientId ? `client:${row.clientId}` : 'admins';
+      this.trackingGateway.server.to(room).emit('notification:new', {
+        clientId: row.clientId,
+      });
       return row;
     } catch (err) {
       // Secondary to the domain action — swallow so the trigger site is never disrupted,
@@ -210,9 +271,14 @@ export class NotificationsService {
   /* Read side (scoped by the trip-ownership rule)                    */
   /* ---------------------------------------------------------------- */
 
-  /** A CLIENT sees only its own notifications; an ADMIN sees all. */
+  /**
+   * Audience scope (D2). A CLIENT sees only its own notifications (clientId = self); an
+   * ADMIN sees only admin-audience notifications (clientId null) — NOT every client's
+   * notifications. Using `{ clientId: null }` (never `{}`) keeps client-scoped rows out
+   * of the admin feed and admin-audience rows out of every client feed.
+   */
   private scopeWhere(user: AuthUser): Prisma.NotificationWhereInput {
-    return user.role === 'CLIENT' ? { clientId: user.userId } : {};
+    return user.role === 'CLIENT' ? { clientId: user.userId } : { clientId: null };
   }
 
   async list(user: AuthUser, query: NotificationQueryDto) {
