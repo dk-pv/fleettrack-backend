@@ -571,10 +571,22 @@ function makeReadService(opts: any = {}) {
       findUnique: jest.fn().mockResolvedValue(opts.request ?? null),
       delete: jest.fn().mockResolvedValue({ id: 'req1' }),
     },
+    trip: {
+      // count 0 models a tripId pointing at an already-deleted Trip.
+      deleteMany: jest.fn().mockResolvedValue({ count: opts.tripCount ?? 1 }),
+    },
     vehicle: {
       findMany: jest.fn().mockResolvedValue(opts.vehicles ?? []),
     },
   };
+  // Interactive $transaction: the callback gets a client. Handing it the same mock lets a
+  // test assert on prisma.* while still proving both writes ran inside the one call. When
+  // opts.txFails is set the callback's work is discarded, standing in for a rollback.
+  prisma.$transaction = jest.fn(async (fn: any) => {
+    const result = await fn(prisma);
+    if (opts.txFails) throw new Error('transaction rolled back');
+    return result;
+  });
   const service = new TripRequestsService(prisma, {} as any, {} as any);
   return { service, prisma };
 }
@@ -709,45 +721,65 @@ describe('TripRequest vehicle resolution', () => {
   });
 });
 
+/** A request row as stored; `tripId` is set only once an ADMIN has approved it. */
+const pendingRequest = (over: any = {}) => ({
+  id: 'req1',
+  clientId: 'client-1',
+  status: 'PENDING',
+  tripId: null,
+  ...over,
+});
+const approvedRequest = (over: any = {}) =>
+  pendingRequest({ status: 'APPROVED', tripId: 'trip-99', ...over });
+
 describe('TripRequestsService.remove', () => {
-  it('lets an ADMIN delete a request', async () => {
-    const { service, prisma } = makeReadService({
-      request: { id: 'req1', clientId: 'client-1', tripId: null },
-    });
+  it('lets an ADMIN delete a PENDING request', async () => {
+    const { service, prisma } = makeReadService({ request: pendingRequest() });
     await expect(service.remove(adminUser, 'req1')).resolves.toEqual({
       success: true,
     });
     expect(prisma.tripRequest.delete).toHaveBeenCalledWith({
       where: { id: 'req1' },
     });
+    expect(prisma.trip.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('lets a CLIENT delete its OWN request', async () => {
+  it('lets a CLIENT delete its OWN PENDING request', async () => {
+    const { service, prisma } = makeReadService({ request: pendingRequest() });
+    await service.remove(clientUser, 'req1');
+    expect(prisma.tripRequest.delete).toHaveBeenCalled();
+    expect(prisma.trip.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('deletes a REJECTED request (no Trip) the same way', async () => {
     const { service, prisma } = makeReadService({
-      request: { id: 'req1', clientId: 'client-1', tripId: null },
+      request: pendingRequest({ status: 'REJECTED' }),
     });
     await service.remove(clientUser, 'req1');
     expect(prisma.tripRequest.delete).toHaveBeenCalled();
+    expect(prisma.trip.deleteMany).not.toHaveBeenCalled();
   });
 
   it('refuses a CLIENT deleting a request owned by another client', async () => {
     const { service, prisma } = makeReadService({
-      request: { id: 'req1', clientId: 'client-OTHER', tripId: null },
+      request: pendingRequest({ clientId: 'client-OTHER' }),
     });
     await expect(service.remove(clientUser, 'req1')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
     expect(prisma.tripRequest.delete).not.toHaveBeenCalled();
+    expect(prisma.trip.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('refuses to delete a request that already produced a Trip', async () => {
+  it('refuses a CLIENT deleting ANOTHER client’s APPROVED request — the Trip survives', async () => {
     const { service, prisma } = makeReadService({
-      request: { id: 'req1', clientId: 'client-1', tripId: 'trip-99' },
+      request: approvedRequest({ clientId: 'client-OTHER' }),
     });
-    await expect(service.remove(adminUser, 'req1')).rejects.toBeInstanceOf(
-      ConflictException,
+    await expect(service.remove(clientUser, 'req1')).rejects.toBeInstanceOf(
+      ForbiddenException,
     );
-    expect(prisma.tripRequest.delete).not.toHaveBeenCalled();
+    expect(prisma.trip.deleteMany).not.toHaveBeenCalled();
   });
 
   it('404s an unknown request', async () => {
@@ -755,6 +787,77 @@ describe('TripRequestsService.remove', () => {
     await expect(service.remove(adminUser, 'nope')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  /* ---- an approved request owns its Trip: both go, or neither does ---- */
+
+  it('a CLIENT deleting its own APPROVED request deletes the linked Trip too', async () => {
+    const { service, prisma } = makeReadService({ request: approvedRequest() });
+
+    await expect(service.remove(clientUser, 'req1')).resolves.toEqual({
+      success: true,
+    });
+    expect(prisma.trip.deleteMany).toHaveBeenCalledWith({
+      where: { id: 'trip-99' },
+    });
+    expect(prisma.tripRequest.delete).toHaveBeenCalledWith({
+      where: { id: 'req1' },
+    });
+  });
+
+  it('an ADMIN deleting an APPROVED request deletes the linked Trip too', async () => {
+    const { service, prisma } = makeReadService({ request: approvedRequest() });
+
+    await expect(service.remove(adminUser, 'req1')).resolves.toEqual({
+      success: true,
+    });
+    expect(prisma.trip.deleteMany).toHaveBeenCalledWith({
+      where: { id: 'trip-99' },
+    });
+    expect(prisma.tripRequest.delete).toHaveBeenCalled();
+  });
+
+  it('no longer throws REQUEST_HAS_TRIP for an authorised delete', async () => {
+    const { service } = makeReadService({ request: approvedRequest() });
+    await expect(service.remove(clientUser, 'req1')).resolves.toEqual({
+      success: true,
+    });
+  });
+
+  it('runs BOTH deletes inside ONE transaction (no orphan window)', async () => {
+    const { service, prisma } = makeReadService({ request: approvedRequest() });
+    await service.remove(adminUser, 'req1');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    // Both writes were issued by the client the transaction handed the callback, so
+    // neither can commit without the other.
+    const tx = prisma.$transaction.mock.calls[0][0];
+    expect(typeof tx).toBe('function');
+    expect(prisma.trip.deleteMany).toHaveBeenCalledTimes(1);
+    expect(prisma.tripRequest.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failing transaction surfaces the error — nothing is reported as deleted', async () => {
+    const { service } = makeReadService({
+      request: approvedRequest(),
+      txFails: true,
+    });
+    await expect(service.remove(adminUser, 'req1')).rejects.toThrow(
+      'transaction rolled back',
+    );
+  });
+
+  it('still deletes when tripId points at an already-deleted Trip', async () => {
+    // deleteMany (count 0), not delete — a P2025 here would roll the request delete back
+    // and make the row permanently undeletable.
+    const { service, prisma } = makeReadService({
+      request: approvedRequest(),
+      tripCount: 0,
+    });
+    await expect(service.remove(adminUser, 'req1')).resolves.toEqual({
+      success: true,
+    });
+    expect(prisma.tripRequest.delete).toHaveBeenCalled();
   });
 });
 
@@ -819,6 +922,17 @@ describe('trip creation route permissions', () => {
       expect(guard.canActivate(guardCtx(handler, { role: 'ADMIN' }))).toBe(true);
       expect(guard.canActivate(guardCtx(handler, { role: 'CLIENT' }))).toBe(false);
     }
+  });
+
+  it('delete is behind JwtAuthGuard, so an anonymous caller gets 401', () => {
+    // Class-level @UseGuards(JwtAuthGuard, RolesGuard) — the JWT guard runs first, so a
+    // request with no/invalid token never reaches the role check or the service.
+    const guards = Reflect.getMetadata(
+      '__guards__',
+      TripRequestsController,
+    ) as any[];
+    expect(guards.map((g) => g.name)).toContain('JwtAuthGuard');
+    expect(guards.map((g) => g.name)).toContain('RolesGuard');
   });
 
   it('delete stays open to both roles (the service scopes it)', () => {

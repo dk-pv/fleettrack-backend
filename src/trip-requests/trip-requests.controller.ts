@@ -72,7 +72,8 @@ export class TripRequestsController {
 
   /**
    * Delete a request. ADMIN may delete any; a CLIENT only its own (enforced in the
-   * service, which also refuses to delete a request that already produced a Trip).
+   * service). An approved request is deleted together with the Trip it produced, in one
+   * transaction — see TripRequestsService.remove.
    */
   @Roles('ADMIN', 'CLIENT')
   @Delete(':id')

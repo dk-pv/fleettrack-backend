@@ -310,8 +310,10 @@ export class TripRequestsService {
 
   /**
    * Delete a trip request. ADMIN may delete any; a CLIENT only its own (same ownership
-   * rule as findOne). A request that already produced a Trip is refused — the Trip is a
-   * real operational record and deleting its originating request would orphan the link.
+   * rule as findOne). An approved request OWNS the Trip it produced, so the two are
+   * deleted together in one transaction — either both rows go or neither does. The Trip
+   * is always the requesting client's own (approve passes request.clientId to
+   * TripsService.create), so the ownership check above covers it too.
    */
   async remove(user: AuthUser, id: string) {
     const request = await this.prisma.tripRequest.findUnique({ where: { id } });
@@ -321,11 +323,16 @@ export class TripRequestsService {
       throw new ForbiddenException('Not your request');
     }
 
-    if (request.tripId) {
-      throw new ConflictException('REQUEST_HAS_TRIP');
-    }
-
-    await this.prisma.tripRequest.delete({ where: { id } });
+    await this.prisma.$transaction(async (tx) => {
+      // deleteMany, not delete: `tripId` is a plain column with no foreign key, so it can
+      // point at a Trip already removed via DELETE /trips/:id. `delete` would throw P2025
+      // there and roll back, leaving the request permanently undeletable. The Trip's own
+      // children (stops, events, breadcrumbs, delays, cost, files, POD) cascade in the DB.
+      if (request.tripId) {
+        await tx.trip.deleteMany({ where: { id: request.tripId } });
+      }
+      await tx.tripRequest.delete({ where: { id } });
+    });
 
     return { success: true };
   }
