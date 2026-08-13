@@ -7,9 +7,111 @@ import {
   DEFAULT_DELAY_MARGIN_MINUTES,
 } from '../trips/trip-delay.util';
 
+/* ------------------------------------------------------------------ */
+/* Weekly activity — day bucketing (DSH-05)                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Day boundaries for the weekly-activity chart are computed in THIS zone, never the
+ * server's local timezone: production runs UTC while development may not, and which
+ * day a trip lands in must not depend on where the process happens to run.
+ *
+ * Asia/Kolkata is a fixed +05:30 offset and has never observed DST, so a constant
+ * offset is exact here and needs no timezone library. If FleetTrack ever goes
+ * multi-region, replace this pair with a per-client zone + an Intl-based conversion;
+ * nothing else in getWeeklyActivity has to change.
+ */
+const REPORT_TIME_ZONE = 'Asia/Kolkata';
+const REPORT_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** How many days the chart shows, including today. */
+const WEEKLY_ACTIVITY_DAYS = 7;
+
+const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** The calendar date (YYYY-MM-DD) an instant falls on in REPORT_TIME_ZONE. */
+function zonedDateKey(instant: Date): string {
+  return new Date(instant.getTime() + REPORT_OFFSET_MS)
+    .toISOString()
+    .slice(0, 10);
+}
+
+/** Short weekday name for an instant, in REPORT_TIME_ZONE. */
+function zonedWeekdayLabel(instant: Date): string {
+  return WEEKDAY_LABELS[
+    new Date(instant.getTime() + REPORT_OFFSET_MS).getUTCDay()
+  ];
+}
+
+/** The UTC instant at which the zone-local day containing `instant` begins. */
+function zonedDayStart(instant: Date): Date {
+  return new Date(
+    Date.parse(`${zonedDateKey(instant)}T00:00:00.000Z`) - REPORT_OFFSET_MS,
+  );
+}
+
 @Injectable()
 export class DashboardService {
   constructor(private prisma: PrismaService) {}
+
+  /**
+   * Weekly activity (DSH-05): trips scheduled to start on each of the last 7 days,
+   * today included, oldest → newest. Scoped by clientId exactly like the sibling
+   * dashboard stats (the controller pins a CLIENT to its own id).
+   *
+   * One bounded query over the 7-day window, then bucketed in memory — the same
+   * shape as getDeliveryMetrics. Prisma's groupBy cannot do this: grouping on a
+   * DateTime groups by the exact instant, so seven trips at seven different times
+   * would produce seven groups rather than seven days.
+   *
+   * Always returns exactly 7 buckets; days with no trips come back as 0 so the chart
+   * draws an honest flat line instead of an empty or misleading gap.
+   */
+  async getWeeklyActivity(clientId?: string) {
+    const todayStart = zonedDayStart(new Date());
+    const windowStart = new Date(
+      todayStart.getTime() - (WEEKLY_ACTIVITY_DAYS - 1) * DAY_MS,
+    );
+    const windowEnd = new Date(todayStart.getTime() + DAY_MS); // exclusive
+
+    const where: Prisma.TripWhereInput = {
+      ...(clientId ? { clientId } : {}),
+      scheduledStart: { gte: windowStart, lt: windowEnd },
+    };
+
+    const trips = await this.prisma.trip.findMany({
+      where,
+      select: { scheduledStart: true },
+    });
+
+    // Zero-filled buckets first, so a day with no trips still appears.
+    const counts = new Map<string, number>();
+    const days = Array.from({ length: WEEKLY_ACTIVITY_DAYS }, (_, i) => {
+      const dayStart = new Date(
+        windowStart.getTime() + i * DAY_MS,
+      );
+      const date = zonedDateKey(dayStart);
+      counts.set(date, 0);
+      return { date, label: zonedWeekdayLabel(dayStart) };
+    });
+
+    for (const trip of trips) {
+      const key = zonedDateKey(trip.scheduledStart);
+      const current = counts.get(key);
+      // Guard rather than assume: a boundary instant must never create an 8th bucket.
+      if (current !== undefined) counts.set(key, current + 1);
+    }
+
+    return {
+      success: true,
+      data: {
+        timeZone: REPORT_TIME_ZONE,
+        days: days.map((d) => ({ ...d, value: counts.get(d.date) ?? 0 })),
+      },
+    };
+  }
 
   /**
    * Delivery performance metrics (DSH-04.1). Historical on-time vs delayed split

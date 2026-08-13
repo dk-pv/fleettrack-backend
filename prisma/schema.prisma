@@ -116,6 +116,10 @@ model Trip {
   vehicle    Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
   driverId   String?
   driverName String?
+  // Driver contact captured at ADMIN direct-create or at request approval. Nullable in
+  // the DB so existing trips migrate untouched; required-ness is enforced for the ADMIN
+  // create and approval paths in the service/DTO, not by the column.
+  driverPhone String?
 
   // Customer this trip is for (CUS-07) — nullable; detaches on customer delete
   customerId String?
@@ -512,7 +516,10 @@ model TripRequest {
   reference      String?
   vehicleId      String?
   driverId       String?
+  // Driver is NOT supplied by the CLIENT — both fields stay null until an ADMIN enters
+  // them in the approval modal, at which point they are written here and onto the Trip.
   driverName     String?
+  driverPhone    String?
   customerId     String?
   origin         String
   destination    String

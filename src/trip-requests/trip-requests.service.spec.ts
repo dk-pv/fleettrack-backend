@@ -9,6 +9,7 @@ import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { TripRequestsService } from './trip-requests.service';
 import { TripRequestsController } from './trip-requests.controller';
+import { TripsController } from '../trips/trips.controller';
 import { TripsService } from '../trips/trips.service';
 import { RolesGuard } from '../auth/roles.guard';
 import { CreateTripDto } from '../trips/dto/create-trip.dto';
@@ -56,6 +57,9 @@ function makeService(
 
 const clientUser = { userId: 'client-1', role: 'CLIENT' } as any;
 const adminUser = { userId: 'admin-1', role: 'ADMIN' } as any;
+
+/** Driver the ADMIN supplies in the approval modal — required on every approve. */
+const APPROVE_DRIVER = { driverName: 'Ravi Kumar', driverPhone: '+91 98765 43210' };
 
 const baseDto = (over: Partial<CreateTripDto> = {}): CreateTripDto =>
   ({
@@ -281,7 +285,7 @@ describe('create() fires the TRIP_REQUESTED admin notification', () => {
 describe('TripRequestsService.approve', () => {
   it('lets an ADMIN approve a PENDING request', async () => {
     const { service } = makeApproval();
-    const res = await service.approve(adminUser, 'req1');
+    const res = await service.approve(adminUser, 'req1', APPROVE_DRIVER);
     expect(res.success).toBe(true);
     expect(res.request.status).toBe('APPROVED');
   });
@@ -302,7 +306,7 @@ describe('TripRequestsService.approve', () => {
 
   it('cannot approve an already-APPROVED request', async () => {
     const { service, prisma } = makeApproval({ request: { status: 'APPROVED' } });
-    await expect(service.approve(adminUser, 'req1')).rejects.toBeInstanceOf(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toBeInstanceOf(
       ConflictException,
     );
     expect(prisma.trip.create).not.toHaveBeenCalled();
@@ -310,7 +314,7 @@ describe('TripRequestsService.approve', () => {
 
   it('cannot approve a REJECTED request', async () => {
     const { service, prisma } = makeApproval({ request: { status: 'REJECTED' } });
-    await expect(service.approve(adminUser, 'req1')).rejects.toBeInstanceOf(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toBeInstanceOf(
       ConflictException,
     );
     expect(prisma.trip.create).not.toHaveBeenCalled();
@@ -318,19 +322,19 @@ describe('TripRequestsService.approve', () => {
 
   it('creates exactly one Trip', async () => {
     const { service, prisma } = makeApproval();
-    await service.approve(adminUser, 'req1');
+    await service.approve(adminUser, 'req1', APPROVE_DRIVER);
     expect(prisma.trip.create).toHaveBeenCalledTimes(1);
   });
 
   it('creates the Trip in ASSIGNED status (vehicle + driver present)', async () => {
     const { service, prisma } = makeApproval();
-    await service.approve(adminUser, 'req1');
+    await service.approve(adminUser, 'req1', APPROVE_DRIVER);
     expect(prisma.trip.create.mock.calls[0][0].data.status).toBe('ASSIGNED');
   });
 
   it('stores the created tripId on the request', async () => {
     const { service, prisma } = makeApproval();
-    const res = await service.approve(adminUser, 'req1');
+    const res = await service.approve(adminUser, 'req1', APPROVE_DRIVER);
     expect(prisma.tripRequest.update.mock.calls[0][0].data.tripId).toBe(
       'trip-99',
     );
@@ -339,7 +343,7 @@ describe('TripRequestsService.approve', () => {
 
   it('stores the reviewer id and review timestamp', async () => {
     const { service, prisma } = makeApproval();
-    await service.approve(adminUser, 'req1');
+    await service.approve(adminUser, 'req1', APPROVE_DRIVER);
     const data = prisma.tripRequest.update.mock.calls[0][0].data;
     expect(data.reviewedById).toBe('admin-1');
     expect(data.reviewedAt).toBeInstanceOf(Date);
@@ -347,7 +351,7 @@ describe('TripRequestsService.approve', () => {
 
   it('revalidates vehicle ownership against current state (rolls back if not owned)', async () => {
     const { service, prisma } = makeApproval({ vehicle: null });
-    await expect(service.approve(adminUser, 'req1')).rejects.toBeInstanceOf(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toBeInstanceOf(
       BadRequestException,
     );
     // Ownership was checked with the OWNING client, not the admin.
@@ -364,7 +368,7 @@ describe('TripRequestsService.approve', () => {
 
   it('revalidates customer ownership against current state (rolls back if not owned)', async () => {
     const { service, prisma } = makeApproval({ customer: null });
-    await expect(service.approve(adminUser, 'req1')).rejects.toBeInstanceOf(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toBeInstanceOf(
       BadRequestException,
     );
     expect(prisma.customer.findFirst).toHaveBeenCalledWith({
@@ -381,7 +385,7 @@ describe('TripRequestsService.approve', () => {
     const { service, prisma } = makeApproval({
       overlap: [{ tripId: 't-x', reference: 'TRIP-X' }],
     });
-    await expect(service.approve(adminUser, 'req1')).rejects.toMatchObject({
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toMatchObject({
       message: 'VEHICLE_OVERLAP',
     });
     expect(prisma.trip.create).not.toHaveBeenCalled();
@@ -396,7 +400,7 @@ describe('TripRequestsService.approve', () => {
       request: { vehicleId: null }, // isolate the driver overlap check
       overlap: [{ tripId: 't-y', reference: 'TRIP-Y' }],
     });
-    await expect(service.approve(adminUser, 'req1')).rejects.toMatchObject({
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toMatchObject({
       message: 'DRIVER_OVERLAP',
     });
     expect(prisma.trip.create).not.toHaveBeenCalled();
@@ -410,7 +414,7 @@ describe('TripRequestsService.approve', () => {
     const { service, prisma, notifications } = makeApproval({
       tripCreate: jest.fn().mockRejectedValue(new Error('db down')),
     });
-    await expect(service.approve(adminUser, 'req1')).rejects.toThrow('db down');
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toThrow('db down');
     expect(prisma.tripRequest.updateMany).toHaveBeenLastCalledWith({
       where: { id: 'req1', status: 'APPROVED', tripId: null },
       data: { status: 'PENDING' },
@@ -422,7 +426,7 @@ describe('TripRequestsService.approve', () => {
   it('does NOT roll back to PENDING when metadata persistence fails AFTER Trip creation', async () => {
     const { service, prisma, notifications } = makeApproval({ updateFail: true });
     // The metadata write throws, and that error surfaces to the caller.
-    await expect(service.approve(adminUser, 'req1')).rejects.toThrow(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toThrow(
       'meta write failed',
     );
     // The Trip was created exactly once.
@@ -444,7 +448,7 @@ describe('TripRequestsService.approve', () => {
     // After the metadata-write failure the row is APPROVED in the DB. A retry sees APPROVED
     // and 409s WITHOUT creating a second Trip — the duplicate-Trip invariant holds.
     const { service, prisma } = makeApproval({ request: { status: 'APPROVED' } });
-    await expect(service.approve(adminUser, 'req1')).rejects.toBeInstanceOf(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toBeInstanceOf(
       ConflictException,
     );
     expect(prisma.trip.create).not.toHaveBeenCalled();
@@ -452,7 +456,7 @@ describe('TripRequestsService.approve', () => {
 
   it('a losing concurrent approval (claim count 0) creates no Trip and 409s', async () => {
     const { service, prisma, notifications } = makeApproval({ claimCount: 0 });
-    await expect(service.approve(adminUser, 'req1')).rejects.toBeInstanceOf(
+    await expect(service.approve(adminUser, 'req1', APPROVE_DRIVER)).rejects.toBeInstanceOf(
       ConflictException,
     );
     expect(prisma.trip.create).not.toHaveBeenCalled();
@@ -461,7 +465,7 @@ describe('TripRequestsService.approve', () => {
 
   it('notifies the requesting CLIENT only after the Trip is created', async () => {
     const { service, notifications } = makeApproval();
-    await service.approve(adminUser, 'req1');
+    await service.approve(adminUser, 'req1', APPROVE_DRIVER);
     expect(notifications.onTripRequestApproved).toHaveBeenCalledTimes(1);
     const [reqArg, tripIdArg] =
       notifications.onTripRequestApproved.mock.calls[0];
@@ -548,5 +552,285 @@ describe('TripRequestsService.reject', () => {
     expect(notifications.onTripRequestRejected.mock.calls[0][0]).toEqual(
       expect.objectContaining({ clientId: 'client-1', rejectionReason: 'No capacity' }),
     );
+  });
+});
+
+/* ================================================================ */
+/* Driver flow, vehicle resolution and delete                        */
+/* ================================================================ */
+
+/**
+ * Harness for the read/delete paths. Separate from makeService() above so the existing
+ * approve tests keep their exact mock surface; this one adds the vehicle lookup that
+ * withVehicles() performs and the delete the new endpoint needs.
+ */
+function makeReadService(opts: any = {}) {
+  const prisma: any = {
+    tripRequest: {
+      findMany: jest.fn().mockResolvedValue(opts.requests ?? []),
+      findUnique: jest.fn().mockResolvedValue(opts.request ?? null),
+      delete: jest.fn().mockResolvedValue({ id: 'req1' }),
+    },
+    vehicle: {
+      findMany: jest.fn().mockResolvedValue(opts.vehicles ?? []),
+    },
+  };
+  const service = new TripRequestsService(prisma, {} as any, {} as any);
+  return { service, prisma };
+}
+
+const VEHICLE = {
+  id: 'veh-1',
+  vehicleNumber: 'KL84D1577',
+  vehicleName: 'Tata Ace',
+};
+
+describe('TripRequest driver flow', () => {
+  it('create() ignores any driver a CLIENT tries to send', async () => {
+    const { service, prisma } = makeService();
+    await service.create(clientUser, {
+      ...baseDto(),
+      driverId: 'drv-x',
+      driverName: 'Client Supplied',
+      driverPhone: '+91 00000 00000',
+    } as any);
+
+    const data = prisma.tripRequest.create.mock.calls[0][0].data;
+    expect(data.driverId).toBeNull();
+    expect(data.driverName).toBeNull();
+    expect(data.driverPhone).toBeNull();
+  });
+
+  it('approve() rejects a missing driver name', async () => {
+    const { service } = makeService();
+    await expect(
+      service.approve(adminUser, 'req1', {
+        driverName: '   ',
+        driverPhone: '+91 98765 43210',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('approve() rejects a missing driver phone', async () => {
+    const { service } = makeService();
+    await expect(
+      service.approve(adminUser, 'req1', {
+        driverName: 'Ravi Kumar',
+        driverPhone: '',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('approve() saves the driver onto the Trip and back onto the request', async () => {
+    const { service, prisma } = makeApproval();
+    await service.approve(adminUser, 'req1', APPROVE_DRIVER);
+
+    const tripData = prisma.trip.create.mock.calls[0][0].data;
+    expect(tripData.driverName).toBe('Ravi Kumar');
+    expect(tripData.driverPhone).toBe('+91 98765 43210');
+
+    const reqData = prisma.tripRequest.update.mock.calls[0][0].data;
+    expect(reqData.driverName).toBe('Ravi Kumar');
+    expect(reqData.driverPhone).toBe('+91 98765 43210');
+  });
+
+  it('an ADMIN direct create with a name but no phone is refused', async () => {
+    const { service } = makeApproval();
+    const trips = (service as any).trips as TripsService;
+    await expect(
+      trips.create({ userId: 'admin-1', role: 'ADMIN' } as any, {
+        ...baseDto(),
+        clientId: 'client-1',
+        driverName: 'Ravi Kumar',
+      } as any),
+    ).rejects.toMatchObject({ message: 'DRIVER_PHONE_REQUIRED' });
+  });
+
+  it('an ADMIN direct create requires a driver name', async () => {
+    const { service } = makeApproval();
+    const trips = (service as any).trips as TripsService;
+    await expect(
+      trips.create({ userId: 'admin-1', role: 'ADMIN' } as any, {
+        ...baseDto(),
+        clientId: 'client-1',
+        driverName: '   ', // whitespace-only must count as missing
+        driverPhone: '+91 98765 43210',
+      } as any),
+    ).rejects.toMatchObject({ message: 'DRIVER_NAME_REQUIRED' });
+  });
+
+  it('a CLIENT trip request needs no driver at all', async () => {
+    const { service } = makeService();
+    await expect(service.create(clientUser, baseDto())).resolves.toMatchObject({
+      success: true,
+    });
+  });
+});
+
+describe('TripRequest vehicle resolution', () => {
+  it('findOne attaches the assigned vehicle with its number', async () => {
+    const { service, prisma } = makeReadService({
+      request: { id: 'req1', clientId: 'client-1', vehicleId: 'veh-1' },
+      vehicles: [VEHICLE],
+    });
+
+    const { request } = await service.findOne(adminUser, 'req1');
+    expect(request.vehicle).toEqual(VEHICLE);
+    expect(request.vehicle?.vehicleNumber).toBe('KL84D1577');
+    expect(prisma.vehicle.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('findAll attaches vehicles in ONE batched lookup (no N+1)', async () => {
+    const { service, prisma } = makeReadService({
+      requests: [
+        { id: 'r1', clientId: 'client-1', vehicleId: 'veh-1' },
+        { id: 'r2', clientId: 'client-1', vehicleId: 'veh-1' },
+        { id: 'r3', clientId: 'client-1', vehicleId: null },
+      ],
+      vehicles: [VEHICLE],
+    });
+
+    const { requests } = await service.findAll(adminUser);
+    expect(prisma.vehicle.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.vehicle.findMany.mock.calls[0][0].where.id.in).toEqual([
+      'veh-1',
+    ]);
+    expect(requests[0].vehicle?.vehicleNumber).toBe('KL84D1577');
+    expect(requests[1].vehicle?.vehicleNumber).toBe('KL84D1577');
+    expect(requests[2].vehicle).toBeNull();
+  });
+
+  it('skips the vehicle query entirely when no request has a vehicle', async () => {
+    const { service, prisma } = makeReadService({
+      requests: [{ id: 'r1', clientId: 'client-1', vehicleId: null }],
+    });
+    await service.findAll(adminUser);
+    expect(prisma.vehicle.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService.remove', () => {
+  it('lets an ADMIN delete a request', async () => {
+    const { service, prisma } = makeReadService({
+      request: { id: 'req1', clientId: 'client-1', tripId: null },
+    });
+    await expect(service.remove(adminUser, 'req1')).resolves.toEqual({
+      success: true,
+    });
+    expect(prisma.tripRequest.delete).toHaveBeenCalledWith({
+      where: { id: 'req1' },
+    });
+  });
+
+  it('lets a CLIENT delete its OWN request', async () => {
+    const { service, prisma } = makeReadService({
+      request: { id: 'req1', clientId: 'client-1', tripId: null },
+    });
+    await service.remove(clientUser, 'req1');
+    expect(prisma.tripRequest.delete).toHaveBeenCalled();
+  });
+
+  it('refuses a CLIENT deleting a request owned by another client', async () => {
+    const { service, prisma } = makeReadService({
+      request: { id: 'req1', clientId: 'client-OTHER', tripId: null },
+    });
+    await expect(service.remove(clientUser, 'req1')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(prisma.tripRequest.delete).not.toHaveBeenCalled();
+  });
+
+  it('refuses to delete a request that already produced a Trip', async () => {
+    const { service, prisma } = makeReadService({
+      request: { id: 'req1', clientId: 'client-1', tripId: 'trip-99' },
+    });
+    await expect(service.remove(adminUser, 'req1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(prisma.tripRequest.delete).not.toHaveBeenCalled();
+  });
+
+  it('404s an unknown request', async () => {
+    const { service } = makeReadService({ request: null });
+    await expect(service.remove(adminUser, 'nope')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+});
+
+/* ================================================================ */
+/* Route permissions — the CLIENT must not bypass the request flow   */
+/* ================================================================ */
+
+/**
+ * A CLIENT reaches a trip only through POST /trip-requests → ADMIN approve, which is
+ * where the driver is assigned. Creating a trip directly would skip both the approval
+ * and the mandatory driver details, so POST /trips is ADMIN-only. These assert the
+ * decorators themselves through the real RolesGuard, so a decorator edit fails here.
+ */
+function tripsGuardCtx(handler: any, user: any) {
+  return {
+    switchToHttp: () => ({ getRequest: () => ({ user }) }),
+    getHandler: () => handler,
+    getClass: () => TripsController,
+  } as any;
+}
+
+describe('trip creation route permissions', () => {
+  const guard = new RolesGuard(new Reflector());
+
+  it('ADMIN may POST /trips', () => {
+    expect(
+      guard.canActivate(
+        tripsGuardCtx(TripsController.prototype.create, { role: 'ADMIN' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('CLIENT may NOT POST /trips (must use the request workflow)', () => {
+    expect(
+      guard.canActivate(
+        tripsGuardCtx(TripsController.prototype.create, { role: 'CLIENT' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('CLIENT may POST /trip-requests', () => {
+    expect(
+      guard.canActivate(
+        guardCtx(TripRequestsController.prototype.create, { role: 'CLIENT' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('ADMIN may NOT POST /trip-requests (only clients raise requests)', () => {
+    expect(
+      guard.canActivate(
+        guardCtx(TripRequestsController.prototype.create, { role: 'ADMIN' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('approve and reject stay ADMIN-only', () => {
+    for (const handler of [
+      TripRequestsController.prototype.approve,
+      TripRequestsController.prototype.reject,
+    ]) {
+      expect(guard.canActivate(guardCtx(handler, { role: 'ADMIN' }))).toBe(true);
+      expect(guard.canActivate(guardCtx(handler, { role: 'CLIENT' }))).toBe(false);
+    }
+  });
+
+  it('delete stays open to both roles (the service scopes it)', () => {
+    expect(
+      guard.canActivate(
+        guardCtx(TripRequestsController.prototype.remove, { role: 'ADMIN' }),
+      ),
+    ).toBe(true);
+    expect(
+      guard.canActivate(
+        guardCtx(TripRequestsController.prototype.remove, { role: 'CLIENT' }),
+      ),
+    ).toBe(true);
   });
 });

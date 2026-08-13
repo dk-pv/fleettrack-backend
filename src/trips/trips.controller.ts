@@ -21,6 +21,7 @@ import { CreateTripDto } from './dto/create-trip.dto';
 import { UpdateTripDto } from './dto/update-trip.dto';
 import { UpdateTripStatusDto } from './dto/update-trip-status.dto';
 import { OverlapQueryDto } from './dto/overlap-query.dto';
+import { TripsQueryDto } from './dto/trips-query.dto';
 import { EtaAlertsQueryDto } from './dto/eta-alerts-query.dto';
 import { TripReportQueryDto } from './dto/trip-report-query.dto';
 import { DriverReportQueryDto } from './dto/driver-report-query.dto';
@@ -34,28 +35,40 @@ interface AuthedRequest extends Request {
 /**
  * Trip Management API.
  *
- * Role rule (inverse of vehicles): the CLIENT owns the trip lifecycle; the ADMIN
- * is read-only. Ownership (client sees only its own trips) is enforced in the
- * service via the JWT `userId`, which is the Client id for a CLIENT account.
+ * Role rule (inverse of vehicles): the CLIENT owns the trip lifecycle (status changes,
+ * stops, costs); the ADMIN reads, and is the only role that may CREATE a trip directly —
+ * a CLIENT reaches a trip through the request/approval workflow instead. Ownership
+ * (client sees only its own trips) is enforced in the service via the JWT `userId`,
+ * which is the Client id for a CLIENT account.
  */
 @Controller('trips')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class TripsController {
   constructor(private readonly tripsService: TripsService) {}
 
-  // CLIENT creates its own trip; ADMIN creates directly on behalf of a selected client
-  // (dto.clientId, validated in the service). Ownership/overlap are enforced server-side
-  // against the resolved owner — the frontend selection is never trusted.
-  @Roles('CLIENT', 'ADMIN')
+  // ADMIN only — it creates on behalf of a selected client (dto.clientId, validated in
+  // the service; ownership/overlap are enforced against the resolved owner, never the
+  // frontend selection). A CLIENT must go through the request workflow
+  // (POST /trip-requests → ADMIN approve), which is where the driver is assigned, so
+  // creating directly would bypass both the approval and the mandatory driver details.
+  // Approval itself calls TripsService.create() in-process, so it is unaffected by this.
+  @Roles('ADMIN')
   @Post()
   create(@Req() req: Request, @Body() dto: CreateTripDto) {
     return this.tripsService.create((req as any).user, dto);
   }
 
-  @Roles('CLIENT')
+  // ADMIN reads fleet-wide (optionally narrowed by ?clientId); CLIENT is pinned to its
+  // own trips by findAll, which ignores the query param for a CLIENT. `?status=` is
+  // optional — omitted, the list is unfiltered exactly as before.
+  @Roles('CLIENT', 'ADMIN')
   @Get()
-  findAll(@Req() req: Request, @Query('clientId') clientId?: string) {
-    return this.tripsService.findAll((req as any).user, clientId);
+  findAll(@Req() req: Request, @Query() query: TripsQueryDto) {
+    return this.tripsService.findAll(
+      (req as any).user,
+      query.clientId,
+      query.status,
+    );
   }
 
   // Must precede @Get(':id') so the ':id' route doesn't capture "overlap".
@@ -86,13 +99,18 @@ export class TripsController {
     return this.tripsService.getTimeline((req as any).user, id);
   }
 
-  @Roles('CLIENT')
+  // Read-only, and the dashboard ETA panel needs it per trip. Ownership stays with the
+  // service: getProgress calls assertReadable, which still rejects a CLIENT reading
+  // another client's trip.
+  @Roles('CLIENT', 'ADMIN')
   @Get(':id/progress')
   progress(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getProgress((req as any).user, id);
   }
 
-  @Roles('CLIENT')
+  // Same as :id/progress — read-only, needed by the dashboard ETA panel, ownership
+  // still enforced by assertReadable inside getEta.
+  @Roles('CLIENT', 'ADMIN')
   @Get(':id/eta')
   eta(@Req() req: Request, @Param('id') id: string) {
     return this.tripsService.getEta((req as any).user, id);

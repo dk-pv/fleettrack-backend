@@ -45,6 +45,14 @@ export class CreateTripDto {
   @IsString()
   driverName?: string;
 
+  // Optional at the DTO layer because the same DTO serves the CLIENT trip-request path
+  // (which carries no driver at all) and the ADMIN direct-create path (which requires
+  // one). TripsService.create enforces both for ADMIN, mirroring how clientId is
+  // optional here but required for an ADMIN via resolveAdminTargetClient.
+  @IsOptional()
+  @IsString()
+  driverPhone?: string;
+
   // Customer this trip is for (CUS-07) — optional link.
   @IsOptional()
   @IsString()

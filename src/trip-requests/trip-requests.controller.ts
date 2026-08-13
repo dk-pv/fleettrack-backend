@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -16,6 +17,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { CreateTripDto } from '../trips/dto/create-trip.dto';
 import { RejectTripRequestDto } from './dto/reject-trip-request.dto';
+import { ApproveTripRequestDto } from './dto/approve-trip-request.dto';
 
 /** Express request with the JWT-authenticated user attached by the guards. */
 interface AuthedRequest extends Request {
@@ -54,11 +56,28 @@ export class TripRequestsController {
     return this.service.findOne(req.user, id);
   }
 
-  /** ADMIN approves a PENDING request → creates the Trip (reuses TripsService.create). */
+  /**
+   * ADMIN approves a PENDING request → creates the Trip (reuses TripsService.create).
+   * The driver (name + phone) is supplied here, not by the requesting CLIENT.
+   */
   @Roles('ADMIN')
   @Patch(':id/approve')
-  approve(@Req() req: AuthedRequest, @Param('id') id: string) {
-    return this.service.approve(req.user, id);
+  approve(
+    @Req() req: AuthedRequest,
+    @Param('id') id: string,
+    @Body() dto: ApproveTripRequestDto,
+  ) {
+    return this.service.approve(req.user, id, dto);
+  }
+
+  /**
+   * Delete a request. ADMIN may delete any; a CLIENT only its own (enforced in the
+   * service, which also refuses to delete a request that already produced a Trip).
+   */
+  @Roles('ADMIN', 'CLIENT')
+  @Delete(':id')
+  remove(@Req() req: AuthedRequest, @Param('id') id: string) {
+    return this.service.remove(req.user, id);
   }
 
   /** ADMIN rejects a PENDING request with a mandatory reason → no Trip created. */

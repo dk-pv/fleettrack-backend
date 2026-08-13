@@ -82,4 +82,17 @@ export class DashboardController {
 
     return this.dashboardService.getDeliveryMetrics(filterClientId);
   }
+
+  /** Trips scheduled to start on each of the last 7 days (DSH-05). */
+  @UseGuards(JwtAuthGuard)
+  @Get('weekly-activity')
+  async getWeeklyActivity(
+    @Req() req: AuthedRequest,
+    @Query('clientId') clientId?: string,
+  ) {
+    const filterClientId =
+      req.user.role === 'CLIENT' ? req.user.userId : clientId;
+
+    return this.dashboardService.getWeeklyActivity(filterClientId);
+  }
 }

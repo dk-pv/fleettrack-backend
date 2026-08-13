@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
+import { Prisma, TripStatus } from '@prisma/client';
 import { TripsService } from './trips.service';
 
 /**
@@ -93,7 +94,9 @@ const createDto = (over: any = {}) =>
     clientId: 'client-A',
     vehicleId: 'veh-1',
     driverId: 'drv:john',
+    // An ADMIN direct create requires both driver fields (see requireAdminDriver).
     driverName: 'John',
+    driverPhone: '+91 98765 43210',
     customerId: 'cust-1',
     origin: 'Kochi',
     destination: 'Calicut',
@@ -319,5 +322,75 @@ describe('TripsService.checkOverlap — Slice B option access', () => {
     const res = await service.checkOverlap(adminUser, overlapQuery() as any);
     expect(res.hasOverlap).toBe(false);
     expect(prisma.trip.findMany).not.toHaveBeenCalled();
+  });
+});
+
+
+/* ================================================================ */
+/* findAll — optional server-side status filter (Batch 4)            */
+/* ================================================================ */
+
+/**
+ * findAll harness: trip.findMany drives the result. These assert on the `where` handed
+ * to Prisma, which is the whole point of the feature — the status condition must reach
+ * the query so the database returns only the matching rows, never a full fetch filtered
+ * in memory. Tenant scoping is asserted alongside it so the filter can't quietly widen it.
+ */
+function makeFindAllService(trips: unknown[] = []) {
+  const findMany = jest.fn().mockResolvedValue(trips);
+  const prisma: any = { trip: { findMany } };
+  return {
+    service: new TripsService(prisma, {} as any, {} as any),
+    findMany,
+  };
+}
+
+/** The `where` handed to prisma.trip.findMany on the first call. */
+function whereOf(findMany: jest.Mock): Prisma.TripWhereInput {
+  const args = findMany.mock.calls[0][0] as { where: Prisma.TripWhereInput };
+  return args.where;
+}
+
+const findAllAdmin = { userId: 'admin-1', role: 'ADMIN' };
+const findAllClient = { userId: 'client-1', role: 'CLIENT' };
+
+describe('TripsService.findAll — status filter', () => {
+  it('no status → no status condition (existing behaviour unchanged)', async () => {
+    const { service, findMany } = makeFindAllService();
+    await service.findAll(findAllAdmin);
+    expect(whereOf(findMany).status).toBeUndefined();
+  });
+
+  it('passes the status condition to Prisma rather than filtering in memory', async () => {
+    const { service, findMany } = makeFindAllService();
+    await service.findAll(findAllAdmin, undefined, [TripStatus.ONGOING]);
+    expect(whereOf(findMany).status).toEqual({ in: [TripStatus.ONGOING] });
+  });
+
+  it('supports the multi-status set the dashboard asks for', async () => {
+    const { service, findMany } = makeFindAllService();
+    const active = [TripStatus.STARTED, TripStatus.ONGOING, TripStatus.DELAYED];
+    await service.findAll(findAllAdmin, undefined, active);
+    expect(whereOf(findMany).status).toEqual({ in: active });
+  });
+
+  it('an empty status list is treated as no filter', async () => {
+    const { service, findMany } = makeFindAllService();
+    await service.findAll(findAllAdmin, undefined, []);
+    expect(whereOf(findMany).status).toBeUndefined();
+  });
+
+  it('CLIENT stays pinned to its own trips when filtering', async () => {
+    const { service, findMany } = makeFindAllService();
+    await service.findAll(findAllClient, 'other-client', [TripStatus.ONGOING]);
+    expect(whereOf(findMany).clientId).toBe('client-1');
+    expect(whereOf(findMany).status).toEqual({ in: [TripStatus.ONGOING] });
+  });
+
+  it('ADMIN clientId scoping still applies alongside the filter', async () => {
+    const { service, findMany } = makeFindAllService();
+    await service.findAll(findAllAdmin, 'client-A', [TripStatus.ASSIGNED]);
+    expect(whereOf(findMany).clientId).toBe('client-A');
+    expect(whereOf(findMany).status).toEqual({ in: [TripStatus.ASSIGNED] });
   });
 });

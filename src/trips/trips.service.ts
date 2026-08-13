@@ -161,7 +161,11 @@ export class TripsService {
   /* Reads                                                            */
   /* ---------------------------------------------------------------- */
 
-  async findAll(user: AuthUser, selectedClientId?: string) {
+  async findAll(
+    user: AuthUser,
+    selectedClientId?: string,
+    statuses?: TripStatus[],
+  ) {
     const where: Prisma.TripWhereInput = {};
 
     // ADMIN may narrow by a selected client; a CLIENT is pinned to its own trips.
@@ -170,6 +174,13 @@ export class TripsService {
     }
     if (user.role === 'CLIENT') {
       where.clientId = user.userId;
+    }
+
+    // Optional status filter, applied in the query so the database returns only the
+    // matching rows. Omitted (or an empty list) leaves the list unfiltered, so every
+    // existing caller is unaffected.
+    if (statuses?.length) {
+      where.status = { in: statuses };
     }
 
     const trips = await this.prisma.trip.findMany({
@@ -1364,6 +1375,13 @@ export class TripsService {
         ? await this.resolveAdminTargetClient(dto.clientId)
         : user.userId;
 
+    // An ADMIN creating a trip directly must name the driver and give a contact number.
+    // Enforced here rather than on the DTO because the same CreateTripDto also carries a
+    // CLIENT trip request, which deliberately has no driver at all (the ADMIN supplies it
+    // at approval instead). Same shape as the clientId rule directly above.
+    const driver =
+      user.role === 'ADMIN' ? this.requireAdminDriver(dto) : null;
+
     // A linked customer must belong to the owning client (CUS-07.1) — the server-side
     // guarantee behind the form only listing that client's own customers.
     await this.assertOwnedCustomer(ownerClientId, dto.customerId);
@@ -1401,9 +1419,14 @@ export class TripsService {
 
     // TM-01.2: a trip created with both a vehicle and a driver is already
     // assigned, so it persists as ASSIGNED; it only rests in PLANNED when
-    // created without an assignment.
+    // created without an assignment. A driver is now identified by name (typed by the
+    // ADMIN) rather than only by driverId, so either satisfies "has a driver".
+    const driverName = driver?.name ?? dto.driverName ?? null;
+    const driverPhone = driver?.phone ?? dto.driverPhone ?? null;
     const initialStatus =
-      dto.vehicleId && dto.driverId ? TripStatus.ASSIGNED : TripStatus.PLANNED;
+      dto.vehicleId && (dto.driverId || driverName)
+        ? TripStatus.ASSIGNED
+        : TripStatus.PLANNED;
 
     // TM-01.2: persist with a genuinely unique reference. `Trip.reference` has a
     // DB-level unique index; generation uses a CSPRNG (collision-resistant), and on the
@@ -1424,7 +1447,8 @@ export class TripsService {
             clientId: ownerClientId, // CLIENT: self (JWT); ADMIN: the validated selected client
             vehicleId: dto.vehicleId ?? null,
             driverId: dto.driverId ?? null,
-            driverName: dto.driverName ?? null,
+            driverName,
+            driverPhone,
             customerId: dto.customerId ?? null,
             origin: dto.origin,
             originLat: origin.lat,
@@ -1893,6 +1917,26 @@ export class TripsService {
     if (!client) throw new BadRequestException('INVALID_CLIENT');
 
     return client.id;
+  }
+
+  /**
+   * Driver name + phone for an ADMIN direct trip creation. Both are mandatory: an ADMIN
+   * types them freely (there is no Driver entity), so this is the only place they can be
+   * enforced. Whitespace-only counts as missing. A CLIENT never reaches this — its trip
+   * request carries no driver, and the ADMIN supplies one at approval instead.
+   */
+  private requireAdminDriver(dto: CreateTripDto): {
+    name: string;
+    phone: string;
+  } {
+    const name = typeof dto.driverName === 'string' ? dto.driverName.trim() : '';
+    if (!name) throw new BadRequestException('DRIVER_NAME_REQUIRED');
+
+    const phone =
+      typeof dto.driverPhone === 'string' ? dto.driverPhone.trim() : '';
+    if (!phone) throw new BadRequestException('DRIVER_PHONE_REQUIRED');
+
+    return { name, phone };
   }
 
   private async resolveActor(
