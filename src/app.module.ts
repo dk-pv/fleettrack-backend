@@ -18,8 +18,12 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { MailModule } from './mail/mail.module';
 import { GpsModule } from './gps/gps.module';
 import { TripRequestsModule } from './trip-requests/trip-requests.module';
+import { HealthController } from './health.controller';
 
 @Module({
+  // Registered here rather than as its own module: the health check has no service, no
+  // providers and no dependencies, so a dedicated module would be an empty wrapper.
+  controllers: [HealthController],
   imports: [
     ScheduleModule.forRoot(),
     PrismaModule,
