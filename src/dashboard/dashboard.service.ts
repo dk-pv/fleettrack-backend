@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, TripStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { getVehicleStatus } from '../common/utils/vehicle-status';
+import { effectiveVehicleStatus } from '../common/utils/vehicle-status';
 import {
   detectDelay,
   DEFAULT_DELAY_MARGIN_MINUTES,
@@ -217,11 +217,12 @@ export class DashboardService {
     let offlineVehicles = 0;
     let idleVehicles = 0;
 
+    // Reads the status TrackingService already decided and persisted — the same value
+    // /tracking renders — instead of recomputing it here from ignition + speed. The old
+    // local calculation ignored GPS freshness, so a vehicle could be OFFLINE on /tracking
+    // and counted active here at the same moment.
     vehicles.forEach((vehicle) => {
-      const status = getVehicleStatus(
-        vehicle.ignition,
-        vehicle.speed,
-      );
+      const status = effectiveVehicleStatus(vehicle);
 
       if (status === 'MOVING') {
         activeVehicles++;
@@ -249,9 +250,16 @@ export class DashboardService {
 
   async getActiveVehicles(clientId?: string) {
   const vehicles = await this.prisma.vehicle.findMany({
+    // Was `ignition: true`, which selected on engine state and therefore included
+    // devices that had not reported in weeks but were frozen with ignition=true —
+    // KL85B1418 (31 days stale, speed 13.2) sat in this widget labelled MOVING.
+    // Selecting on the persisted live state excludes stale vehicles at the query
+    // level, so a stale row can never reach the response. Both live states are kept
+    // so the widget shows the same MOVING/IDLE mix it always did.
     where: {
       ...(clientId ? { clientId } : {}),
-      ignition: true,
+      isOnline: true,
+      status: { in: ['MOVING', 'IDLE'] },
     },
 
     orderBy: {
@@ -266,10 +274,8 @@ export class DashboardService {
     vehicleNumber: vehicle.vehicleNumber,
     driverName: vehicle.driverName,
     speed: vehicle.speed,
-    status: getVehicleStatus(
-      vehicle.ignition,
-      vehicle.speed
-    ),
+    // The stored status, not a re-derivation — same value /tracking shows.
+    status: effectiveVehicleStatus(vehicle),
   }));
 
   return {

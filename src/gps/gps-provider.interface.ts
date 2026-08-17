@@ -28,6 +28,19 @@ export interface NormalizedPosition extends NormalizedVehicle {
   charge?: boolean | null;
   /** Provider "last_updated" / "time" as a UTC Date, or null if absent/unparseable. */
   providerTimestamp?: Date | null;
+  /**
+   * True when `providerVehicleId` is NOT the provider's own vehicle id but a substitute
+   * the adapter had to fall back to (Transight positions carry no vehicle_id, so the IMEI
+   * stands in whenever the inventory cache can't resolve one).
+   *
+   * The sync treats a fallback identity as "unproven": it will happily UPDATE a vehicle it
+   * can match by IMEI, but it will not CREATE a new row on that basis, because a cold
+   * cache cannot distinguish "genuinely new vehicle" from "existing vehicle we failed to
+   * resolve" — and guessing wrong is what produced 12 duplicate rows in production.
+   *
+   * Absent/false for AiroTrack, whose positions always carry their own stable identity.
+   */
+  identityIsFallback?: boolean;
 }
 
 export interface GpsProviderConfig {

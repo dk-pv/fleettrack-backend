@@ -10,10 +10,23 @@ describe('TransightAdapter', () => {
     expect(TransightAdapter.parseLocation(null)).toBeNull();
   });
 
-  it('parses UTC time with no tz marker AS UTC (not local)', () => {
-    const d = TransightAdapter.parseUtcTime('2022-02-08 14:17:35');
+  // Transight sends local (IST) time with no tz marker. Treating it as UTC dated every
+  // position 5.5h in the future, which made `now - fixTime` negative and defeated every
+  // downstream freshness check. Verified against production 2026-08-14.
+  it('parses tz-less time as IST (+05:30), not UTC', () => {
+    const d = TransightAdapter.parseProviderTime('2022-02-08 14:17:35');
+    expect(d?.toISOString()).toBe('2022-02-08T08:47:35.000Z');
+  });
+
+  it('rejects unusable timestamps instead of inventing one', () => {
+    expect(TransightAdapter.parseProviderTime('')).toBeNull();
+    expect(TransightAdapter.parseProviderTime(null)).toBeNull();
+    expect(TransightAdapter.parseProviderTime('not-a-date')).toBeNull();
+  });
+
+  it('honours an explicit offset override (other-timezone accounts)', () => {
+    const d = TransightAdapter.parseProviderTime('2022-02-08 14:17:35', 0);
     expect(d?.toISOString()).toBe('2022-02-08T14:17:35.000Z');
-    expect(TransightAdapter.parseUtcTime('')).toBeNull();
   });
 
   it('accepts status 1, throws on 4 (rate limit) and other statuses', () => {
@@ -68,7 +81,8 @@ describe('TransightAdapter', () => {
       batteryVoltage: null,
       charge: null,
     });
-    expect(pos!.providerTimestamp?.toISOString()).toBe('2022-02-08T14:17:35.000Z');
+    // 14:17:35 IST → 08:47:35 UTC
+    expect(pos!.providerTimestamp?.toISOString()).toBe('2022-02-08T08:47:35.000Z');
   });
 
   it('falls back to IMEI as providerVehicleId when inventory misses', () => {
@@ -86,5 +100,48 @@ describe('TransightAdapter', () => {
       () => undefined,
     );
     expect(pos).toBeNull();
+  });
+});
+
+/**
+ * Identity-fallback flagging. Transight positions carry no vehicle_id, so the adapter
+ * substitutes the IMEI when its inventory cache cannot resolve one. That substitution is
+ * now flagged, because the sync must not CREATE a vehicle on an unproven identity — doing
+ * so is what produced 12 duplicate rows in production on 2026-08-14.
+ */
+describe('TransightAdapter identity fallback flag', () => {
+  const rawPosition = {
+    vehicle: 'KL84D1577',
+    imei: '860560066144082',
+    ignition: true,
+    speed: 12,
+    location: '010.995818 075.991227',
+    time: '2026-08-14 17:47:49',
+  };
+
+  it('marks identity as PROVEN when the inventory cache resolves a vehicle_id', () => {
+    const pos = TransightAdapter.normalizePosition(rawPosition, () => ({
+      vehicleId: '228068',
+      vehicleNumber: 'KL84D1577',
+    }));
+
+    expect(pos!.providerVehicleId).toBe('228068');
+    expect(pos!.identityIsFallback).toBe(false);
+  });
+
+  it('marks identity as FALLBACK when the cache misses and the IMEI stands in', () => {
+    const pos = TransightAdapter.normalizePosition(rawPosition, () => undefined);
+
+    expect(pos!.providerVehicleId).toBe('860560066144082'); // the IMEI, not a vehicle_id
+    expect(pos!.identityIsFallback).toBe(true);
+  });
+
+  it('still drops a position that has neither a resolvable id nor an IMEI', () => {
+    expect(
+      TransightAdapter.normalizePosition(
+        { vehicle: 'X', location: '1 2', speed: 0, ignition: false, time: '' },
+        () => undefined,
+      ),
+    ).toBeNull();
   });
 });

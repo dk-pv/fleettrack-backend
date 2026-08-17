@@ -6,6 +6,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TrackingGateway } from './tracking.gateway';
 import { GpsIntegrationService } from '../gps/gps-integration.service';
 import { NormalizedPosition } from '../gps/gps-provider.interface';
+import {
+  isPositionFresh,
+  positionAgeMs,
+  stalenessThresholdMs,
+} from '../gps/gps-freshness';
 
 function haversineDistance(
   lat1: number,
@@ -89,10 +94,30 @@ export class TrackingService {
     return code === 'P1001' || code === 'P1002' || code === 'P1017';
   }
 
-  private deriveStatus(ignition: boolean, speed: number): VehicleStatus {
+  /**
+   * Vehicle status from its LATEST position.
+   *
+   * OFFLINE means "we have no recent GPS fix", nothing else. It previously meant
+   * "ignition is off", which is a completely different fact and produced the two
+   * contradictions this fleet was showing:
+   *
+   *   - a parked vehicle reporting perfectly was labelled OFFLINE, and the last speed
+   *     it happened to be carrying was rendered next to that label as if current
+   *     ("OFFLINE · 69 km/h");
+   *   - a device dead for 28 days but frozen with ignition=true was labelled MOVING,
+   *     because nothing ever checked how old the fix was.
+   *
+   * Engine-off with a fresh fix is IDLE (parked and reporting), which the existing
+   * VehicleStatus enum already expresses — no schema change needed.
+   */
+  private deriveStatus(
+    ignition: boolean,
+    speed: number,
+    fresh: boolean,
+  ): VehicleStatus {
+    if (!fresh) return 'OFFLINE';
     if (ignition && speed > 0) return 'MOVING';
-    if (ignition && speed <= 0) return 'IDLE';
-    return 'OFFLINE';
+    return 'IDLE';
   }
 
   /**
@@ -121,13 +146,37 @@ export class TrackingService {
 
         try {
           const positions = await provider.getLatestPositions();
-          this.logger.log(
-            `Provider ${config.provider}: ${positions.length} positions`,
-          );
+
+          // One summary line per provider per sync, not one per vehicle — this runs
+          // every minute. Counts make the difference between "the provider is down"
+          // and "the provider is up but its devices stopped reporting" obvious.
+          let fresh = 0;
+          let stale = 0;
+          let noTimestamp = 0;
+          let unresolved = 0;
 
           for (const pos of positions) {
-            await this.upsertPosition(pos);
+            const outcome = await this.upsertPosition(
+              pos,
+              config.pollIntervalSec,
+            );
+            if (outcome === 'fresh') fresh++;
+            else if (outcome === 'stale') stale++;
+            else if (outcome === 'unresolved') unresolved++;
+            else noTimestamp++;
           }
+
+          this.logger.log(
+            `Provider ${config.provider}: ${positions.length} positions ` +
+              `(${fresh} fresh, ${stale} stale` +
+              (noTimestamp ? `, ${noTimestamp} without a timestamp` : '') +
+              // Non-zero means identity resolution is degraded — the condition that
+              // used to create duplicates instead of reporting itself.
+              (unresolved ? `, ${unresolved} SKIPPED (unresolved identity)` : '') +
+              `, window ${Math.round(
+                stalenessThresholdMs(config.pollIntervalSec) / 60000,
+              )}m)`,
+          );
 
           await this.gpsIntegration.markSynced(config.provider, null);
         } catch (providerError) {
@@ -164,16 +213,78 @@ export class TrackingService {
    * identity (providerName + providerVehicleId) — NOT by clientId, so assignment is
    * preserved. Records location history + trip breadcrumbs and broadcasts the update
    * (scoped: owning client's room + admins; unassigned → admins only).
+   *
+   * Returns how the position was judged, for the per-provider summary log.
    */
-  private async upsertPosition(pos: NormalizedPosition): Promise<void> {
-    const status = this.deriveStatus(pos.ignition, pos.speed);
+  private async upsertPosition(
+    pos: NormalizedPosition,
+    pollIntervalSec: number | null | undefined,
+  ): Promise<'fresh' | 'stale' | 'untimed' | 'unresolved'> {
+    const fixTime = pos.providerTimestamp ?? null;
 
-    const existing = await this.prisma.vehicle.findFirst({
+    // A provider that sends no timestamp at all gives us nothing better to go on than
+    // the fact that it just returned this vehicle, so the poll itself is the evidence.
+    // Both current providers DO send one, so this is a fallback, not the normal path —
+    // and it is deliberately not written to lastProviderUpdate as if it were a real fix.
+    const fresh = fixTime
+      ? isPositionFresh(fixTime, pollIntervalSec)
+      : true;
+    const outcome: 'fresh' | 'stale' | 'untimed' = !fixTime
+      ? 'untimed'
+      : fresh
+        ? 'fresh'
+        : 'stale';
+
+    const status = this.deriveStatus(pos.ignition, pos.speed, fresh);
+
+    let existing = await this.prisma.vehicle.findFirst({
       where: {
         providerName: pos.providerName,
         providerVehicleId: pos.providerVehicleId,
       },
     });
+
+    // Same physical device, different provider key. Transight positions carry no
+    // vehicle_id, so the adapter falls back to the IMEI whenever its inventory cache is
+    // cold (fresh container, or the 100/day inventory limit refusing the call). Once the
+    // inventory loads, the SAME vehicle starts arriving keyed by vehicle_id — and
+    // @@unique([providerName, providerVehicleId]) treated that as a brand new vehicle,
+    // silently creating a second row per truck. Matching on the IMEI re-keys the row we
+    // already have instead of duplicating it.
+    if (!existing && pos.imei) {
+      existing = await this.prisma.vehicle.findFirst({
+        where: { providerName: pos.providerName, imei: pos.imei },
+      });
+
+      if (existing) {
+        this.logger.log(
+          `Re-keying ${pos.vehicleNumber} (${pos.providerName}) from ` +
+            `providerVehicleId=${existing.providerVehicleId} to ${pos.providerVehicleId} ` +
+            `via IMEI — same device, avoided a duplicate row`,
+        );
+        existing = await this.prisma.vehicle.update({
+          where: { id: existing.id },
+          data: { providerVehicleId: pos.providerVehicleId },
+        });
+      }
+    }
+
+    // Nothing matched by provider id OR by IMEI. If the identity we were given is itself a
+    // fallback (Transight's inventory cache was empty, so the IMEI is standing in for a
+    // vehicle_id we never resolved), we cannot tell a genuinely new vehicle apart from an
+    // existing one we simply failed to resolve. Creating on that guess is exactly what
+    // produced 12 duplicate rows on 2026-08-14, so defer instead: skip this position and
+    // let a later cycle create the vehicle once inventory is back and identity is real.
+    // Nothing is lost — the provider re-sends its latest position every poll.
+    if (!existing && pos.identityIsFallback) {
+      this.logger.warn(
+        `Skipping ${pos.vehicleNumber} (${pos.providerName}, imei=${pos.imei ?? 'none'}): ` +
+          `no vehicle matches this provider id or IMEI, and the identity is a fallback ` +
+          `because the provider inventory was unavailable. Not creating a vehicle on an ` +
+          `unproven identity — will retry once inventory recovers.`,
+      );
+      return 'unresolved';
+    }
 
     if (!existing) {
       const created = await this.prisma.vehicle.create({
@@ -189,13 +300,16 @@ export class TrackingService {
           ignition: pos.ignition,
           batteryVoltage: pos.batteryVoltage ?? undefined,
           charge: pos.charge ?? undefined,
-          isOnline: true,
+          isOnline: fresh,
           status,
           latitude: pos.latitude,
           longitude: pos.longitude,
           speed: pos.speed,
           lastSeenAt: new Date(),
-          lastProviderUpdate: pos.providerTimestamp ?? new Date(),
+          // Only ever a REAL provider fix time. This used to fall back to `new Date()`,
+          // which stamped a vehicle that had not reported in hours as though it had just
+          // sent a fix — the exact value every freshness check depends on, forged.
+          lastProviderUpdate: fixTime,
         },
       });
 
@@ -203,7 +317,25 @@ export class TrackingService {
         `New unassigned inventory vehicle ${pos.vehicleNumber} (${pos.providerName})`,
       );
       this.trackingGateway.emitVehicleUpdate(created);
-      return;
+      return outcome;
+    }
+
+    // An OLDER fix must never overwrite a newer one. Both providers re-serve their last
+    // known position on every call, so a retry landing out of order — or a device that
+    // briefly reports an older buffered fix — would otherwise drag the vehicle back to a
+    // previous location and speed. `lastSeenAt` still advances: we did hear from the
+    // provider, we just learned nothing newer about the vehicle.
+    const isStaleReplay =
+      fixTime != null &&
+      existing.lastProviderUpdate != null &&
+      fixTime.getTime() < existing.lastProviderUpdate.getTime();
+
+    if (isStaleReplay) {
+      await this.prisma.vehicle.update({
+        where: { id: existing.id },
+        data: { lastSeenAt: new Date() },
+      });
+      return outcome;
     }
 
     const updated = await this.prisma.vehicle.update({
@@ -215,13 +347,15 @@ export class TrackingService {
         batteryVoltage: pos.batteryVoltage ?? undefined,
         charge: pos.charge ?? undefined,
         imei: pos.imei ?? existing.imei ?? undefined,
-        isOnline: true,
+        isOnline: fresh,
         status,
         latitude: pos.latitude,
         longitude: pos.longitude,
         speed: pos.speed,
         lastSeenAt: new Date(),
-        lastProviderUpdate: pos.providerTimestamp ?? new Date(),
+        // Only ever a real fix time — never forged from `new Date()`, which is what
+        // used to make an hours-old position look like it had just arrived.
+        lastProviderUpdate: fixTime ?? undefined,
       },
     });
 
@@ -229,6 +363,7 @@ export class TrackingService {
 
     // Scoped delivery: only the owning client's room + admins (never global).
     this.trackingGateway.emitVehicleUpdate(updated);
+    return outcome;
   }
 
   /**
@@ -291,35 +426,62 @@ export class TrackingService {
     });
   }
 
+  /**
+   * Mark vehicles offline once their last GPS fix ages out.
+   *
+   * This used to compare `lastSeenAt` against a flat 5 minutes — but `lastSeenAt` is
+   * stamped `new Date()` on every poll, so for any vehicle the provider keeps returning
+   * it was permanently 0 seconds old and this sweep could never fire. Only a vehicle
+   * that vanished from the feed entirely was ever caught. Freshness now comes from
+   * `lastProviderUpdate` (the GPS fix time) against that provider's own window, so a
+   * device that is still listed but stopped reporting is correctly marked offline.
+   */
   @Cron('0 */1 * * * *')
   async detectOfflineVehicles() {
     try {
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+      // Per-provider windows — Transight's cadence is 5x AiroTrack's, so a single
+      // threshold would either flap Transight or never catch AiroTrack.
+      const integrations = await this.prisma.gpsIntegration.findMany({
+        select: { provider: true, pollIntervalSec: true },
+      });
+      const pollByProvider = new Map<string, number>(
+        integrations.map((i) => [
+          i.provider.toLowerCase(),
+          i.pollIntervalSec ?? 300,
+        ]),
+      );
 
-      const offlineVehicles = await this.prisma.vehicle.findMany({
-        where: {
-          lastSeenAt: {
-            lt: fiveMinutesAgo,
-          },
-          isOnline: true,
-        },
+      const now = Date.now();
+      const candidates = await this.prisma.vehicle.findMany({
+        where: { isOnline: true },
       });
 
-      for (const vehicle of offlineVehicles) {
+      for (const vehicle of candidates) {
+        const poll = pollByProvider.get(
+          (vehicle.providerName ?? '').toLowerCase(),
+        );
+
+        // Fall back to lastSeenAt only when we have no GPS fix time at all, so a
+        // provider that sends no timestamps keeps the old (poll-based) behaviour.
+        const reference = vehicle.lastProviderUpdate ?? vehicle.lastSeenAt;
+        if (isPositionFresh(reference, poll, now)) continue;
+
         const updatedVehicle = await this.prisma.vehicle.update({
-          where: {
-            id: vehicle.id,
-          },
-          data: {
-            isOnline: false,
-            status: 'OFFLINE',
-          },
+          where: { id: vehicle.id },
+          data: { isOnline: false, status: 'OFFLINE' },
         });
 
         // Scoped delivery: only the owning client's room + admins (never global).
         this.trackingGateway.emitVehicleUpdate(updatedVehicle);
 
-        this.logger.warn(`Vehicle offline: ${vehicle.vehicleNumber}`);
+        const age = positionAgeMs(reference, now);
+        this.logger.warn(
+          `Vehicle offline: ${vehicle.vehicleNumber} (last fix ` +
+            (age === null
+              ? 'unknown/invalid'
+              : `${Math.round(age / 60000)}m ago`) +
+            `, window ${Math.round(stalenessThresholdMs(poll) / 60000)}m)`,
+        );
       }
     } catch (error) {
       if (this.isTransientDbError(error)) {

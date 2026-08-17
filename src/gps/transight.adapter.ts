@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import {
   GpsProvider,
   GpsProviderConfig,
@@ -12,11 +14,14 @@ import {
  *   - get_all_vehicles_last_data → positions [{ vehicle, imei, ignition, speed, location, time }] (500/day)
  * Positions carry no vehicle_id, so identity is resolved by joining IMEI → inventory
  * (cached with a TTL to respect the 100/day inventory limit). location is a
- * space-separated "lat lng" string; time is UTC with no tz marker.
+ * space-separated "lat lng" string; time is LOCAL (IST) with no tz marker — see
+ * parseProviderTime, which corrects an earlier assumption that it was UTC.
  * Transight provides no power/charge/battery — those are never invented.
  */
 export class TransightAdapter implements GpsProvider {
   readonly name = 'transight' as const;
+
+  private readonly logger = new Logger(TransightAdapter.name);
 
   private inventoryByImei = new Map<
     string,
@@ -72,11 +77,47 @@ export class TransightAdapter implements GpsProvider {
     return { latitude, longitude };
   }
 
-  /** Transight time is UTC WITHOUT a tz marker ("2022-02-08 14:17:35") — parse as UTC. */
-  static parseUtcTime(time: unknown): Date | null {
+  /**
+   * Transight sends "YYYY-MM-DD HH:mm:ss" with NO timezone marker, and the value is
+   * LOCAL time (IST, UTC+05:30) — not UTC, which is what this adapter assumed.
+   *
+   * Verified against the live production account on 2026-08-14: the newest fix read
+   * "2026-08-14 17:47:49" while real UTC was 12:18:50 — 5h29m ahead. Appending "Z"
+   * therefore dated every Transight position ~5.5 HOURS INTO THE FUTURE, which made
+   * `now - fixTime` negative for the whole fleet. Any freshness check built on that
+   * silently passes forever, and "last seen" was displayed 5.5 hours wrong.
+   *
+   * The offset is overridable without a code change for accounts in another timezone.
+   */
+  static offsetMinutes(): number {
+    const raw = Number(process.env.TRANSIGHT_UTC_OFFSET_MINUTES);
+    return Number.isFinite(raw) ? raw : 330; // +05:30 (IST)
+  }
+
+  /** Parse a Transight local-time string into a real UTC Date; null if unusable. */
+  static parseProviderTime(
+    time: unknown,
+    offsetMinutes: number = TransightAdapter.offsetMinutes(),
+  ): Date | null {
     if (typeof time !== 'string' || !time.trim()) return null;
-    const iso = time.trim().replace(' ', 'T') + 'Z';
-    const d = new Date(iso);
+
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(
+      time.trim(),
+    );
+    if (!m) return null;
+
+    const utcMs =
+      Date.UTC(
+        Number(m[1]),
+        Number(m[2]) - 1,
+        Number(m[3]),
+        Number(m[4]),
+        Number(m[5]),
+        Number(m[6] ?? 0),
+      ) -
+      offsetMinutes * 60_000;
+
+    const d = new Date(utcMs);
     return isNaN(d.getTime()) ? null : d;
   }
 
@@ -107,8 +148,11 @@ export class TransightAdapter implements GpsProvider {
     const loc = TransightAdapter.parseLocation(item?.location);
     const identity = resolve(imei);
     // providerVehicleId = vehicle_id when known, else fall back to the (stable) IMEI.
+    // The fallback is flagged so the sync knows this identity is unproven — see
+    // NormalizedPosition.identityIsFallback.
     const providerVehicleId = identity?.vehicleId ?? imei;
     if (!providerVehicleId) return null;
+    const identityIsFallback = !identity;
     return {
       providerName: 'transight',
       providerVehicleId: String(providerVehicleId),
@@ -123,7 +167,8 @@ export class TransightAdapter implements GpsProvider {
       ignition: Boolean(item?.ignition),
       batteryVoltage: null,
       charge: null,
-      providerTimestamp: TransightAdapter.parseUtcTime(item?.time),
+      providerTimestamp: TransightAdapter.parseProviderTime(item?.time),
+      identityIsFallback,
     };
   }
 
@@ -143,14 +188,37 @@ export class TransightAdapter implements GpsProvider {
     return vehicles;
   }
 
+  /**
+   * Refresh the IMEI → vehicle_id map when it is empty or past its TTL.
+   *
+   * A failure here is NOT fatal — a stale cache still resolves identity correctly, and
+   * positions must keep flowing. But it is no longer silent: this failing with an EMPTY
+   * cache is the precise condition that made every position fall back to an IMEI key and
+   * created 12 duplicate vehicle rows in production on 2026-08-14. It has to be visible in
+   * the logs, and distinguishable from the harmless "stale but usable" case.
+   */
   private async ensureInventory(): Promise<void> {
     const stale =
       Date.now() - this.inventoryFetchedAt > TransightAdapter.INVENTORY_TTL_MS;
     if (this.inventoryByImei.size === 0 || stale) {
       try {
         await this.getVehicles();
-      } catch {
-        // Keep any stale cache; positions fall back to IMEI as providerVehicleId.
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        if (this.inventoryByImei.size === 0) {
+          // No cache at all: identity cannot be resolved for ANY vehicle this cycle.
+          this.logger.error(
+            `Transight inventory unavailable and the identity cache is EMPTY (${reason}). ` +
+              `Positions this cycle carry a fallback IMEI identity: existing vehicles are ` +
+              `still matched by IMEI, but no NEW vehicle will be created until inventory ` +
+              `recovers. Note get_all_vehicles is capped at 100 calls/day.`,
+          );
+        } else {
+          this.logger.warn(
+            `Transight inventory refresh failed (${reason}); continuing with the cached ` +
+              `IMEI → vehicle_id map from ${new Date(this.inventoryFetchedAt).toISOString()}.`,
+          );
+        }
       }
     }
   }
