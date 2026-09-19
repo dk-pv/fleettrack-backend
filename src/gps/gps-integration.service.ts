@@ -34,6 +34,7 @@ export class GpsIntegrationService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.seedAiroTrackFromEnv();
+    await this.seedTransightFromEnv();
   }
 
   /**
@@ -65,6 +66,43 @@ export class GpsIntegrationService implements OnModuleInit {
     } catch (e) {
       this.logger.warn(
         `AiroTrack env seed skipped: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
+   * Transition helper: if no Transight row exists yet, seed one from the
+   * TRANSIGHT_BASE_URL and TRANSIGHT_API env vars so the sync picks it up.
+   * Never overwrites an existing row; the credential stays server-side.
+   */
+  private async seedTransightFromEnv(): Promise<void> {
+    try {
+      const existing = await this.prisma.gpsIntegration.findUnique({
+        where: { provider: 'TRANSIGHT' },
+      });
+      if (existing) return;
+
+      const baseUrl = process.env.TRANSIGHT_BASE_URL;
+      const credential = process.env.TRANSIGHT_API;
+      if (!baseUrl || !credential) {
+        this.logger.warn('Transight env seed skipped: TRANSIGHT_BASE_URL or TRANSIGHT_API is missing.');
+        return;
+      }
+
+      await this.prisma.gpsIntegration.create({
+        data: {
+          provider: 'TRANSIGHT',
+          active: true,
+          baseUrl,
+          credential,
+          system: 'Compass',
+          pollIntervalSec: 300,
+        },
+      });
+      this.logger.log('Seeded Transight GPS integration from env.');
+    } catch (e) {
+      this.logger.warn(
+        `Transight env seed skipped: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }
