@@ -25,12 +25,19 @@ function makeService(opts: {
   clientExists?: boolean;
   activeTrip?: boolean;
 } = {}) {
+  const activeTrip = opts.activeTrip
+    ? { id: 't1', vehicle: { vehicleNumber: 'A1' } }
+    : null;
   const tx = {
-    client: { create: jest.fn().mockResolvedValue(createdClient) },
+    client: {
+      create: jest.fn().mockResolvedValue(createdClient),
+      update: jest.fn().mockResolvedValue(createdClient),
+    },
     vehicle: {
       findMany: jest.fn().mockResolvedValue(opts.findMany ?? []),
       updateMany: jest.fn().mockResolvedValue({ count: opts.updateCount ?? 0 }),
     },
+    trip: { findFirst: jest.fn().mockResolvedValue(activeTrip) },
   };
   const prisma: any = {
     client: {
@@ -42,7 +49,7 @@ function makeService(opts: {
       delete: jest.fn().mockResolvedValue({}),
     },
     trip: {
-      findFirst: jest.fn().mockResolvedValue(opts.activeTrip ? { id: 't1' } : null),
+      findFirst: jest.fn().mockResolvedValue(activeTrip),
     },
     $transaction: jest.fn((cb: any) => cb(tx)),
   };
@@ -120,6 +127,93 @@ describe('ClientsService.create', () => {
     const res = await service.create(dto([]) as any);
     expect(res.success).toBe(true);
     expect(tx.vehicle.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClientsService.update', () => {
+  it('leaves vehicle assignments untouched when vehicleIds is omitted', async () => {
+    const { service, tx } = makeService({ clientExists: true });
+
+    const res = await service.update('c1', {
+      name: 'Client B',
+      email: 'b@x.com',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.client).not.toHaveProperty('password');
+    expect(tx.client.update).toHaveBeenCalledWith({
+      where: { id: 'c1' },
+      data: { name: 'Client B', email: 'b@x.com' },
+    });
+    expect(tx.vehicle.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('makes vehicleIds the full set: unassigns the rest, keeps own, assigns new', async () => {
+    const { service, tx } = makeService({
+      clientExists: true,
+      findMany: [
+        { id: 'v1', clientId: 'c1', vehicleNumber: 'A1' },
+        { id: 'v2', clientId: null, vehicleNumber: 'A2' },
+      ],
+      updateCount: 1,
+    });
+
+    await service.update('c1', { vehicleIds: ['v1', 'v2', 'v2'] });
+
+    expect(tx.vehicle.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { clientId: 'c1', id: { notIn: ['v1', 'v2', 'v2'] } },
+      data: { clientId: null },
+    });
+    expect(tx.vehicle.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: { in: ['v2'] }, clientId: null },
+      data: { clientId: 'c1' },
+    });
+  });
+
+  it('an empty list unassigns every vehicle and deletes none', async () => {
+    const { service, tx } = makeService({ clientExists: true });
+
+    await service.update('c1', { vehicleIds: [] });
+
+    expect(tx.vehicle.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.vehicle.updateMany).toHaveBeenCalledWith({
+      where: { clientId: 'c1', id: { notIn: [] } },
+      data: { clientId: null },
+    });
+    expect(tx.vehicle.findMany).not.toHaveBeenCalled();
+  });
+
+  it("409 when a vehicle is another client's (client left unchanged)", async () => {
+    const { service, tx } = makeService({
+      clientExists: true,
+      findMany: [{ id: 'v9', clientId: 'other', vehicleNumber: 'B9' }],
+    });
+
+    await expect(
+      service.update('c1', { vehicleIds: ['v9'] }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.client.update).not.toHaveBeenCalled();
+  });
+
+  it('409 when removing a vehicle on an active trip (nothing unassigned)', async () => {
+    const { service, tx } = makeService({
+      clientExists: true,
+      activeTrip: true,
+    });
+
+    await expect(service.update('c1', { vehicleIds: [] })).rejects.toThrow(
+      'A1 is on an active trip',
+    );
+    expect(tx.vehicle.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('404 when the client does not exist (nothing written)', async () => {
+    const { service, tx } = makeService({ clientExists: false });
+
+    await expect(service.update('nope', { name: 'X' })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(tx.client.update).not.toHaveBeenCalled();
   });
 });
 

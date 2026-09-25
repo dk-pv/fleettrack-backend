@@ -8,10 +8,11 @@ import {
 import * as bcrypt from 'bcrypt';
 
 import { PrismaService } from '../prisma/prisma.service';
-import { Client, TripStatus } from '@prisma/client';
+import { Client, Prisma, TripStatus } from '@prisma/client';
 import { CreateClientDto } from './dto/create-client.dto';
+import { UpdateClientDto } from './dto/update-client.dto';
 
-/** Trip statuses that are actively running — a client with any of these can't be deleted. */
+/** Trip statuses that are actively running — blocks deleting the client, or removing a vehicle on one. */
 const ACTIVE_TRIP_STATUSES: TripStatus[] = [
   TripStatus.STARTED,
   TripStatus.ONGOING,
@@ -61,45 +62,65 @@ export class ClientsService {
         data: { name, email, password: hashedPassword, apiUrl: '' },
       });
 
-      if (vehicleIds.length > 0) {
-        const vehicles = await tx.vehicle.findMany({
-          where: { id: { in: vehicleIds } },
-          select: { id: true, clientId: true, vehicleNumber: true },
-        });
-
-        if (vehicles.length !== vehicleIds.length) {
-          throw new BadRequestException(
-            'One or more selected vehicles do not exist',
-          );
-        }
-
-        const alreadyAssigned = vehicles.filter((v) => v.clientId !== null);
-        if (alreadyAssigned.length > 0) {
-          throw new ConflictException(
-            `Already assigned to another client: ${alreadyAssigned
-              .map((v) => v.vehicleNumber)
-              .join(', ')}`,
-          );
-        }
-
-        // Assign only rows still unassigned; the count guards a concurrent assign
-        // (any lost row → rollback, so the client is never partially created).
-        const { count } = await tx.vehicle.updateMany({
-          where: { id: { in: vehicleIds }, clientId: null },
-          data: { clientId: created.id },
-        });
-
-        if (count !== vehicleIds.length) {
-          throw new ConflictException(
-            'One or more selected vehicles were just assigned by someone else — please retry',
-          );
-        }
-      }
+      await this.assignVehicles(tx, created.id, vehicleIds);
 
       return created;
     });
 
     return { success: true, client: this.toSafeClient(client) };
+  }
+
+  /**
+   * Assign vehicles to a client inside the caller's transaction. Each must exist and be
+   * unassigned (or already this client's); anything else throws, so the caller rolls back.
+   */
+  private async assignVehicles(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    vehicleIds: string[],
+  ) {
+    const ids = [...new Set(vehicleIds)];
+    if (ids.length === 0) return;
+
+    const vehicles = await tx.vehicle.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, clientId: true, vehicleNumber: true },
+    });
+
+    if (vehicles.length !== ids.length) {
+      throw new BadRequestException(
+        'One or more selected vehicles do not exist',
+      );
+    }
+
+    const alreadyAssigned = vehicles.filter(
+      (v) => v.clientId !== null && v.clientId !== clientId,
+    );
+    if (alreadyAssigned.length > 0) {
+      throw new ConflictException(
+        `Already assigned to another client: ${alreadyAssigned
+          .map((v) => v.vehicleNumber)
+          .join(', ')}`,
+      );
+    }
+
+    const toAssign = vehicles
+      .filter((v) => v.clientId === null)
+      .map((v) => v.id);
+    if (toAssign.length === 0) return;
+
+    // Assign only rows still unassigned; the count guards a concurrent assign
+    // (any lost row → rollback, so nothing is partially saved).
+    const { count } = await tx.vehicle.updateMany({
+      where: { id: { in: toAssign }, clientId: null },
+      data: { clientId },
+    });
+
+    if (count !== toAssign.length) {
+      throw new ConflictException(
+        'One or more selected vehicles were just assigned by someone else — please retry',
+      );
+    }
   }
 
   async findAll() {
@@ -113,8 +134,13 @@ export class ClientsService {
     };
   }
 
-  async update(id: string, body: any) {
-    const { name, email } = body;
+  /**
+   * Update name/email and, when `vehicleIds` is sent, make it the client's complete
+   * vehicle set — all in one transaction. Vehicles left out return to the unassigned
+   * pool (never deleted); new ones follow the same rules as create.
+   */
+  async update(id: string, dto: UpdateClientDto) {
+    const { name, email, vehicleIds } = dto;
 
     const existingClient = await this.prisma.client.findUnique({
       where: { id },
@@ -123,9 +149,35 @@ export class ClientsService {
       throw new NotFoundException('Client not found');
     }
 
-    const updatedClient = await this.prisma.client.update({
-      where: { id },
-      data: { name, email },
+    const updatedClient = await this.prisma.$transaction(async (tx) => {
+      if (vehicleIds) {
+        const leaving: Prisma.VehicleWhereInput = {
+          clientId: id,
+          id: { notIn: vehicleIds },
+        };
+
+        // Unassigning hides the vehicle from the client, so one mid-delivery stays put
+        // (same rule as deleting a client).
+        const activeTrip = await tx.trip.findFirst({
+          where: { vehicle: leaving, status: { in: ACTIVE_TRIP_STATUSES } },
+          select: { vehicle: { select: { vehicleNumber: true } } },
+        });
+        if (activeTrip) {
+          throw new ConflictException(
+            `${activeTrip.vehicle?.vehicleNumber ?? 'A vehicle'} is on an active trip. Complete or cancel it before removing it.`,
+          );
+        }
+
+        // Unassign first, so swapping in a vehicle with the same number never trips
+        // @@unique([clientId, vehicleNumber]).
+        await tx.vehicle.updateMany({
+          where: leaving,
+          data: { clientId: null },
+        });
+        await this.assignVehicles(tx, id, vehicleIds);
+      }
+
+      return tx.client.update({ where: { id }, data: { name, email } });
     });
 
     return { success: true, client: this.toSafeClient(updatedClient) };
