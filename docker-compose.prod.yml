@@ -4,11 +4,14 @@
 # must be cloned side by side and this file must be run from the fleettrack-api dir:
 #
 #   /srv/fleettrack/
-#   ├── fleettrack-api/      <- this file; run `docker compose` from here
+#   ├── fleettrack-api/        <- this file; run `docker compose` from here
 #   ├── fleettrack-admin/
-#   └── uploads/             <- persistent, outside both repos
+#   ├── uploads/               <- persistent, outside both repos
+#   ├── postgres/              <- PostgreSQL data, persistent, outside both repos
+#   └── secrets/postgres.env   <- DB passwords (600, root), outside both repos
 #
-# Deliberately NO postgres and NO redis: the database is external managed Neon.
+# PostgreSQL runs here as the `postgres` service, on a private network with NO published
+# port: only the api container can reach it (as postgres:5432). Deliberately NO redis.
 # Deliberately NO nginx service: Nginx runs on the HOST so Certbot can manage TLS and
 # renew without rebuilding a container. Both apps publish to 127.0.0.1 only, so Nginx
 # is the sole public entry point and nothing is reachable from the internet directly.
@@ -24,6 +27,12 @@ services:
     # Runtime injection only — never baked into an image layer (.dockerignore excludes
     # .env from the build context). This file holds DATABASE_URL, JWT_SECRET, SMTP and
     # GPS credentials and must exist on the VPS with 600 permissions.
+    #
+    # DATABASE_URL targets the postgres service below, with the FLEETTRACK_DB_PASSWORD
+    # from /srv/fleettrack/secrets/postgres.env:
+    #   postgresql://fleettrack:<password>@postgres:5432/fleettrack?schema=public&sslmode=disable
+    # No Neon-style sslmode=require / channel_binding=require: this server has no TLS (the
+    # traffic never leaves the private Docker network), so those would fail every connect.
     env_file:
       - ./.env
 
@@ -46,6 +55,21 @@ services:
       # data and a container rebuild cannot destroy it. The container runs as uid 1000,
       # so this directory must be `chown -R 1000:1000` on the host.
       - /srv/fleettrack/uploads:/app/uploads
+
+    networks:
+      # `default` MUST stay listed: a service that names its networks loses the implicit
+      # default one, and the GPS providers, SMTP and geocoding all need its internet route.
+      # Published ports stay on it too: Docker never makes an internal network a gateway.
+      - default
+      # Private link to PostgreSQL (hostname `postgres`).
+      - db
+
+    # First start: run `migrate deploy` only once PostgreSQL accepts TCP connections.
+    # Compose honours this; Docker's restart-on-reboot does not, and the CMD's migrate
+    # retry loop (10 x 5 s) covers that case.
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     restart: unless-stopped
 
@@ -88,3 +112,86 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  postgres:
+    # Exact minor AND Debian suite: a floating `18` / `latest` tag can silently move to a
+    # new OS base or a new major. 18 is the newest major the pinned Prisma 6 supports.
+    image: postgres:18.6-trixie
+
+    # Runtime injection only, like the api's .env, but a SEPARATE file so the API's
+    # secrets never enter this container. Absolute host path OUTSIDE both repos (600,
+    # root), so it can never be committed or removed by a `git clean`. It holds
+    # POSTGRES_PASSWORD (superuser `postgres`: admin and backups only) and
+    # FLEETTRACK_DB_PASSWORD (the role the API uses, created by docker/postgres/initdb).
+    env_file:
+      - /srv/fleettrack/secrets/postgres.env
+
+    environment:
+      # Read by initdb on the FIRST start only (empty data directory). The builtin C.UTF-8
+      # locale keeps text indexes (User.email, Trip.reference, ...) independent of the
+      # image's glibc, so a future OS-base change cannot silently corrupt them. No
+      # behaviour change: the app does no database-side text sorting or text search.
+      POSTGRES_INITDB_ARGS: "--locale-provider=builtin --locale=C.UTF-8"
+
+    # Sized for a SHARED 4 GB / 1 vCPU host (two Node apps + image builds), not a
+    # dedicated database server, so the 25%-of-RAM shared_buffers rule does not apply.
+    # Parallel query is off: on one vCPU it only adds overhead and /dev/shm use. Slow
+    # statements are logged WITHOUT their bound values (bcrypt hashes, emails, the GPS
+    # provider credential). Never add TZ: the server must stay UTC, like Prisma.
+    command: >-
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c max_connections=30
+      -c max_parallel_workers_per_gather=0
+      -c random_page_cost=1.1
+      -c log_min_duration_statement=500ms
+      -c log_parameter_max_length=0
+
+    volumes:
+      # PostgreSQL 18+ layout: mount the PARENT directory. The data lives in
+      # /var/lib/postgresql/18/docker; mounting .../data (the pre-18 path) makes the 18
+      # image refuse to start. Absolute host path outside both repos, like uploads/, so
+      # neither `git pull` nor `docker compose down -v` can touch it. Leave the host
+      # directory at mode 755: the image creates and owns the 700 data directory inside.
+      - /srv/fleettrack/postgres:/var/lib/postgresql
+      # First start only: creates the non-superuser `fleettrack` role and its database.
+      # The script must stay readable and executable by the container's postgres user
+      # (uid 999); a normal git checkout (mode 755) is.
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+
+    # The private `db` network ONLY, and deliberately NO `ports:`: Docker-published ports
+    # bypass UFW, so not publishing is the only reliable way to keep 5432 off the
+    # internet. Admin access: `docker compose exec postgres psql -U postgres`.
+    networks:
+      - db
+
+    # TCP, not the socket: during first-start initialisation the image runs a temporary
+    # server that listens on the socket only, which would report "ready" too early.
+    # -U postgres avoids a "role root does not exist" log line on every probe.
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # The image stops with SIGINT (fast shutdown + checkpoint). Docker's default 10 s can
+    # cut that checkpoint short and force crash recovery on the next start.
+    stop_grace_period: 60s
+
+    restart: unless-stopped
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # api <-> postgres only; web is not attached, so it cannot reach the database.
+  # `internal: true` gives this network no gateway and no route off the host: postgres
+  # has no internet access, and with no published port nothing outside the host can
+  # reach it.
+  db:
+    internal: true
