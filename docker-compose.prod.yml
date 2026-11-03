@@ -1,11 +1,11 @@
 # FleetTrack — PRODUCTION Compose (Hostinger VPS).
 #
-# Lives in the fleettrack-api repo and builds the sibling frontend repo, so BOTH repos
-# must be cloned side by side and this file must be run from the fleettrack-api dir:
+# Lives in the fleettrack-backend repo and builds the sibling frontend repo, so BOTH repos
+# must be cloned side by side and this file must be run from the fleettrack-backend dir:
 #
 #   /srv/fleettrack/
-#   ├── fleettrack-api/        <- this file; run `docker compose` from here
-#   ├── fleettrack-admin/
+#   ├── fleettrack-backend/    <- this file; run `docker compose` from here
+#   ├── fleettrack-frontend/
 #   ├── uploads/               <- persistent, outside both repos
 #   ├── postgres/              <- PostgreSQL data, persistent, outside both repos
 #   └── secrets/postgres.env   <- DB passwords (600, root), outside both repos
@@ -22,7 +22,7 @@ services:
   api:
     build:
       context: .
-    image: fleettrack-api:prod
+    image: fleettrack-backend:prod
 
     # Runtime injection only — never baked into an image layer (.dockerignore excludes
     # .env from the build context). This file holds DATABASE_URL, JWT_SECRET, SMTP and
@@ -84,7 +84,7 @@ services:
   web:
     build:
       # Sibling repo. Compose resolves this relative to THIS file's directory.
-      context: ../fleettrack-admin
+      context: ../fleettrack-frontend
       args:
         # BUILD-time only: these are inlined into the browser bundle by `next build`.
         # Setting them at runtime does nothing. Changing one requires a rebuild.
@@ -97,7 +97,7 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?set NEXT_PUBLIC_API_URL before building}
         NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:?set NEXT_PUBLIC_SOCKET_URL before building}
         NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:?set NEXT_PUBLIC_GOOGLE_MAPS_API_KEY before building}
-    image: fleettrack-admin:prod
+    image: fleettrack-frontend:prod
 
     ports:
       - "127.0.0.1:3000:3000"
