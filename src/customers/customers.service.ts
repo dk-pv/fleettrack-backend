@@ -6,6 +6,7 @@ import {
 import { AddressKind, Prisma, TripStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { CreateAddressDto } from './dto/create-address.dto';
@@ -256,7 +257,9 @@ export class CustomersService {
         status: t.status,
         origin: t.origin,
         destination: t.destination,
-        vehicle: t.vehicle
+        // A trip on a restricted vehicle stays listed, without its vehicle.
+        vehicle:
+          t.vehicle && !isRestrictedVehicle(t.vehicle.vehicleNumber)
           ? {
               id: t.vehicle.id,
               vehicleNumber: t.vehicle.vehicleNumber,

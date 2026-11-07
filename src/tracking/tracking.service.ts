@@ -15,6 +15,7 @@ import {
   positionAgeMs,
   stalenessThresholdMs,
 } from '../gps/gps-freshness';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 
 function haversineDistance(
   lat1: number,
@@ -165,6 +166,7 @@ export class TrackingService {
           let stale = 0;
           let noTimestamp = 0;
           let unresolved = 0;
+          let restricted = 0;
 
           for (const pos of positions) {
             const outcome = await this.upsertPosition(
@@ -174,6 +176,7 @@ export class TrackingService {
             if (outcome === 'fresh') fresh++;
             else if (outcome === 'stale') stale++;
             else if (outcome === 'unresolved') unresolved++;
+            else if (outcome === 'restricted') restricted++;
             else noTimestamp++;
           }
 
@@ -184,6 +187,7 @@ export class TrackingService {
               // Non-zero means identity resolution is degraded — the condition that
               // used to create duplicates instead of reporting itself.
               (unresolved ? `, ${unresolved} SKIPPED (unresolved identity)` : '') +
+              (restricted ? `, ${restricted} restricted (ignored)` : '') +
               `, window ${Math.round(
                 stalenessThresholdMs(config.pollIntervalSec) / 60000,
               )}m)`,
@@ -308,6 +312,7 @@ export class TrackingService {
     let created = 0;
 
     for (const v of provider.cachedVehicles?.() ?? []) {
+      if (isRestrictedVehicle(v.vehicleNumber)) continue;
       if (await this.findExistingVehicle(v)) continue;
 
       await this.prisma.vehicle.create({
@@ -359,7 +364,11 @@ export class TrackingService {
   private async upsertPosition(
     pos: NormalizedPosition,
     pollIntervalSec: number | null | undefined,
-  ): Promise<'fresh' | 'stale' | 'untimed' | 'unresolved'> {
+  ): Promise<'fresh' | 'stale' | 'untimed' | 'unresolved' | 'restricted'> {
+    // A restricted vehicle is never created, updated, recorded or broadcast. Checked on the
+    // provider's plate before any DB access, so a future arrival never gets a row.
+    if (isRestrictedVehicle(pos.vehicleNumber)) return 'restricted';
+
     const fixTime = pos.providerTimestamp ?? null;
 
     // A provider that sends no timestamp at all gives us nothing better to go on than
@@ -378,6 +387,12 @@ export class TrackingService {
     const status = this.deriveStatus(pos.ignition, pos.speed, fresh);
 
     const existing = await this.findExistingVehicle(pos);
+
+    // Same device, but stored under a restricted plate (the provider renamed it): leave the
+    // row frozen too.
+    if (existing && isRestrictedVehicle(existing.vehicleNumber)) {
+      return 'restricted';
+    }
 
     // Nothing matched by provider id OR by IMEI. If the identity we were given is itself a
     // fallback (Transight's inventory cache was empty, so the IMEI is standing in for a
@@ -577,6 +592,9 @@ export class TrackingService {
       });
 
       for (const vehicle of candidates) {
+        // Restricted rows stay frozen: flipping one OFFLINE would also broadcast it.
+        if (isRestrictedVehicle(vehicle.vehicleNumber)) continue;
+
         const poll = pollByProvider.get(
           (vehicle.providerName ?? '').toLowerCase(),
         );

@@ -41,6 +41,7 @@ import {
   reportRangeStart,
 } from '../common/utils/report-date-range';
 import { driverIdFromName, driverKey } from '../common/utils/driver-key';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 
 type AuthUser = { userId: string; role: string; accountType?: string };
 
@@ -149,7 +150,12 @@ interface EtaScanTrip {
   destinationLat: number | null;
   destinationLng: number | null;
   stops: { lat: number | null; lng: number | null }[];
-  vehicle: { latitude: number; longitude: number; speed: number | null } | null;
+  vehicle: {
+    latitude: number;
+    longitude: number;
+    speed: number | null;
+    vehicleNumber: string;
+  } | null;
 }
 
 @Injectable()
@@ -286,7 +292,14 @@ export class TripsService {
     const trip = await this.prisma.trip.findUnique({
       where: { id },
       include: {
-        vehicle: { select: { latitude: true, longitude: true, speed: true } },
+        vehicle: {
+          select: {
+            latitude: true,
+            longitude: true,
+            speed: true,
+            vehicleNumber: true,
+          },
+        },
         stops: { orderBy: { sequence: 'asc' } },
       },
     });
@@ -330,6 +343,7 @@ export class TripsService {
         latitude: number;
         longitude: number;
         speed: number | null;
+        vehicleNumber: string;
       } | null;
     },
     now: Date,
@@ -370,7 +384,14 @@ export class TripsService {
     const trip = await this.prisma.trip.findUnique({
       where: { id },
       include: {
-        vehicle: { select: { latitude: true, longitude: true, speed: true } },
+        vehicle: {
+          select: {
+            latitude: true,
+            longitude: true,
+            speed: true,
+            vehicleNumber: true,
+          },
+        },
         stops: { orderBy: { sequence: 'asc' } },
       },
     });
@@ -550,7 +571,14 @@ export class TripsService {
     const trips = await this.prisma.trip.findMany({
       where: { status: { in: ETA_ACTIVE_STATUSES } },
       include: {
-        vehicle: { select: { latitude: true, longitude: true, speed: true } },
+        vehicle: {
+          select: {
+            latitude: true,
+            longitude: true,
+            speed: true,
+            vehicleNumber: true,
+          },
+        },
         stops: { orderBy: { sequence: 'asc' } },
       },
     });
@@ -736,7 +764,9 @@ export class TripsService {
       destination: trip.destination,
       status: trip.status,
       scheduledStart: trip.scheduledStart.toISOString(),
-      vehicleNumber: trip.vehicle?.vehicleNumber ?? null,
+      vehicleNumber: isRestrictedVehicle(trip.vehicle?.vehicleNumber)
+        ? null
+        : (trip.vehicle?.vehicleNumber ?? null),
       driverName: trip.driverName ?? null,
     }));
 
@@ -1096,7 +1126,10 @@ export class TripsService {
     // Aggregate per vehicle (keyed by vehicleId; the where filter guarantees non-null).
     const byVehicle = new Map<string, VehiclePerfAccumulator>();
     for (const trip of trips) {
-      if (!trip.vehicleId) continue;
+      // A restricted vehicle gets no utilization row.
+      if (!trip.vehicleId || isRestrictedVehicle(trip.vehicle?.vehicleNumber)) {
+        continue;
+      }
       let acc = byVehicle.get(trip.vehicleId);
       if (!acc) {
         acc = {
@@ -1354,11 +1387,12 @@ export class TripsService {
 
     const vehicles = await this.prisma.vehicle.findMany({
       where,
-      select: { driverName: true },
+      select: { driverName: true, vehicleNumber: true },
     });
 
     const byId = new Map<string, { id: string; name: string }>();
-    for (const { driverName } of vehicles) {
+    for (const { driverName, vehicleNumber } of vehicles) {
+      if (isRestrictedVehicle(vehicleNumber)) continue;
       const name = driverName?.trim();
       const id = driverIdFromName(name);
       if (!name || !id) continue;
@@ -1891,7 +1925,11 @@ export class TripsService {
     const vehicle = await this.prisma.vehicle.findFirst({
       where: { id: vehicleId, clientId },
     });
-    if (!vehicle) throw new BadRequestException('INVALID_VEHICLE');
+    // A restricted vehicle is rejected exactly like a non-existent one. Every path that puts
+    // a vehicle on a trip comes through here: create, update, trip request, approval.
+    if (!vehicle || isRestrictedVehicle(vehicle.vehicleNumber)) {
+      throw new BadRequestException('INVALID_VEHICLE');
+    }
   }
 
   /**
@@ -2071,17 +2109,28 @@ export class TripsService {
         scheduledStart: true,
         scheduledEnd: true,
         status: true,
+        vehicle: { select: { vehicleNumber: true } },
       },
       orderBy: { scheduledStart: 'asc' },
     });
 
-    return trips.map((t) => ({
-      tripId: t.id,
-      reference: t.reference,
-      scheduledStart: t.scheduledStart,
-      scheduledEnd: t.scheduledEnd,
-      status: t.status,
-    }));
+    return (
+      trips
+        // Asked by vehicle id, a restricted vehicle has no bookings to reveal.
+        .filter(
+          (t) =>
+            !(
+              params.vehicleId && isRestrictedVehicle(t.vehicle?.vehicleNumber)
+            ),
+        )
+        .map((t) => ({
+          tripId: t.id,
+          reference: t.reference,
+          scheduledStart: t.scheduledStart,
+          scheduledEnd: t.scheduledEnd,
+          status: t.status,
+        }))
+    );
   }
 
   /**
@@ -2165,7 +2214,7 @@ export class TripsService {
 
     const vehicle = await this.prisma.vehicle.findUnique({
       where: { id: vehicleId },
-      select: { latitude: true, longitude: true },
+      select: { latitude: true, longitude: true, vehicleNumber: true },
     });
     const position = this.vehiclePosition(vehicle);
     if (!position) return '';
@@ -2203,10 +2252,18 @@ export class TripsService {
     return points;
   }
 
+  /**
+   * vehicleNumber is required so every caller's select must carry it: a restricted vehicle
+   * has no position anywhere a trip exposes one (progress, ETAs, alerts, stop check).
+   */
   private vehiclePosition(
-    vehicle: { latitude: number; longitude: number } | null,
+    vehicle: {
+      latitude: number;
+      longitude: number;
+      vehicleNumber: string;
+    } | null,
   ): GeoPoint | null {
-    if (!vehicle) return null;
+    if (!vehicle || isRestrictedVehicle(vehicle.vehicleNumber)) return null;
     const { latitude, longitude } = vehicle;
     if (typeof latitude !== 'number' || typeof longitude !== 'number') {
       return null;
@@ -2216,6 +2273,8 @@ export class TripsService {
   }
 
   private mapTrip(t: any) {
+    // A trip on a restricted vehicle stays readable, but shows no vehicle (id included).
+    const hideVehicle = isRestrictedVehicle(t.vehicle?.vehicleNumber);
     return {
       id: t.id,
       reference: t.reference,
@@ -2224,8 +2283,9 @@ export class TripsService {
       client: t.client
         ? { id: t.client.id, name: t.client.name }
         : { id: t.clientId, name: '' },
-      vehicleId: t.vehicleId,
-      vehicle: t.vehicle
+      vehicleId: hideVehicle ? null : t.vehicleId,
+      vehicle:
+        t.vehicle && !hideVehicle
         ? {
             id: t.vehicle.id,
             vehicleNumber: t.vehicle.vehicleNumber,

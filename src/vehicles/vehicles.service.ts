@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../prisma/prisma.service';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 
 @Injectable()
 export class VehiclesService {
@@ -45,7 +46,8 @@ export class VehiclesService {
 
   return {
     success: true,
-    vehicles,
+    // Restricted vehicles never leave the API (filtered in code: see restricted-vehicles.ts).
+    vehicles: vehicles.filter((v) => !isRestrictedVehicle(v.vehicleNumber)),
   };
 }
 
@@ -65,7 +67,9 @@ export class VehiclesService {
       },
     });
 
-    if (!vehicle) {
+    // A restricted vehicle answers exactly like a missing one, before the ownership check,
+    // so a CLIENT can't tell "restricted" from "not yours".
+    if (!vehicle || isRestrictedVehicle(vehicle.vehicleNumber)) {
       throw new NotFoundException('Vehicle not found');
     }
 
@@ -84,7 +88,9 @@ export class VehiclesService {
       },
     });
 
-    if (!vehicle) {
+    // A restricted vehicle answers exactly like a missing one, before the ownership check,
+    // so a CLIENT can't tell "restricted" from "not yours".
+    if (!vehicle || isRestrictedVehicle(vehicle.vehicleNumber)) {
       throw new NotFoundException('Vehicle not found');
     }
 
@@ -141,7 +147,9 @@ export class VehiclesService {
       },
     });
 
-    if (!vehicle) {
+    // A restricted vehicle answers exactly like a missing one, before the ownership check,
+    // so a CLIENT can't tell "restricted" from "not yours".
+    if (!vehicle || isRestrictedVehicle(vehicle.vehicleNumber)) {
       throw new NotFoundException('Vehicle not found');
     }
 

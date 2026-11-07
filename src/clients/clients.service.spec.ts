@@ -104,6 +104,16 @@ describe('ClientsService.create', () => {
     );
   });
 
+  it('400 for a restricted vehicle, exactly like a missing one (nothing assigned)', async () => {
+    const { service, tx } = makeService({
+      findMany: [{ id: 'vr', clientId: null, vehicleNumber: 'KL85B1418' }],
+    });
+    await expect(service.create(dto(['vr']) as any)).rejects.toThrow(
+      'One or more selected vehicles do not exist',
+    );
+    expect(tx.vehicle.updateMany).not.toHaveBeenCalled();
+  });
+
   it('409 (rollback) on a concurrent-assign race (updated count mismatch)', async () => {
     const { service } = makeService({
       findMany: [{ id: 'v1', clientId: null, vehicleNumber: 'A1' }],
@@ -180,7 +190,26 @@ describe('ClientsService.update', () => {
       where: { clientId: 'c1', id: { notIn: [] } },
       data: { clientId: null },
     });
-    expect(tx.vehicle.findMany).not.toHaveBeenCalled();
+    // The only lookup is the restricted-vehicle check; nothing is assigned.
+    expect(tx.vehicle.findMany).toHaveBeenCalledTimes(1);
+    expect(tx.vehicle.findMany).toHaveBeenCalledWith({
+      where: { clientId: 'c1' },
+      select: { id: true, vehicleNumber: true },
+    });
+  });
+
+  it('never unassigns a restricted vehicle the client still holds', async () => {
+    const { service, tx } = makeService({
+      clientExists: true,
+      findMany: [{ id: 'vr', clientId: 'c1', vehicleNumber: 'KL 85 B 1418' }],
+    });
+
+    await service.update('c1', { vehicleIds: [] });
+
+    expect(tx.vehicle.updateMany).toHaveBeenCalledWith({
+      where: { clientId: 'c1', id: { notIn: ['vr'] } },
+      data: { clientId: null },
+    });
   });
 
   it("409 when a vehicle is another client's (client left unchanged)", async () => {

@@ -8,9 +8,13 @@ import {
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 
 /** A live vehicle update payload — the full Vehicle row (shape unchanged for consumers). */
-type VehicleUpdate = Record<string, any> & { clientId?: string | null };
+type VehicleUpdate = Record<string, any> & {
+  clientId?: string | null;
+  vehicleNumber?: string | null;
+};
 
 // Socket CORS origin. Reuses the existing FRONTEND_URL env var (same one auth uses for
 // reset links), so production restricts to the real frontend origin instead of '*';
@@ -85,6 +89,9 @@ export class TrackingGateway
    * only. Replaces the previous global `server.emit(...)` broadcast; payload is unchanged.
    */
   emitVehicleUpdate(vehicle: VehicleUpdate) {
+    // Every live update passes through here: a restricted vehicle reaches no socket.
+    if (isRestrictedVehicle(vehicle.vehicleNumber)) return;
+
     const payload = { ...vehicle, timestamp: Date.now() };
 
     if (vehicle.clientId) {

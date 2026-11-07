@@ -509,3 +509,64 @@ describe('TrackingService inventory-first gap-fill', () => {
     expect(store.rows).toHaveLength(1);
   });
 });
+
+describe('TrackingService restricted vehicles', () => {
+  const airo = (
+    plate: string,
+    over: Partial<NormalizedPosition> = {},
+  ): NormalizedPosition => ({
+    providerName: 'airotrack',
+    providerVehicleId: plate,
+    vehicleNumber: plate,
+    imei: null,
+    gpsDeviceId: plate,
+    latitude: 11.05,
+    longitude: 75.98,
+    speed: 30,
+    ignition: true,
+    batteryVoltage: null,
+    charge: null,
+    providerTimestamp: new Date(),
+    ...over,
+  });
+
+  it('never creates, updates, records or broadcasts a restricted vehicle', async () => {
+    const frozen = {
+      id: 'v-restricted',
+      vehicleNumber: 'KL85B1418',
+      providerName: 'airotrack',
+      providerVehicleId: 'KL85B1418',
+      imei: null,
+      speed: 0,
+      lastProviderUpdate: null,
+    };
+    const store = makeStore([frozen]);
+    const { service, gateway } = makeService(
+      store,
+      [
+        airo('KL85B1418', { speed: 99 }), // existing row, must stay frozen
+        airo('KL 85 B 4876'), // future arrival, any format: never created
+        airo('KL85B7233'), // a normal vehicle, created as before
+      ],
+      'AIROTRACK',
+      60,
+      // A Transight-style inventory listing a restricted plate is not gap-filled either.
+      [airo('kl85b6934')],
+    );
+
+    await service.syncVehicles();
+
+    expect(store.rows.map((r) => r.vehicleNumber).sort()).toEqual([
+      'KL85B1418',
+      'KL85B7233',
+    ]);
+    expect(store.rows.find((r) => r.id === 'v-restricted')?.speed).toBe(0);
+    expect(store.history.every((h) => h.vehicleId !== 'v-restricted')).toBe(
+      true,
+    );
+    const emitted = gateway.emitVehicleUpdate.mock.calls.map(
+      ([v]: any[]) => v.vehicleNumber,
+    );
+    expect(emitted).toEqual(['KL85B7233']);
+  });
+});

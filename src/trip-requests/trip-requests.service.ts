@@ -8,6 +8,7 @@ import {
 import { Prisma, TripRequest, TripRequestStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TripsService } from '../trips/trips.service';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateTripDto } from '../trips/dto/create-trip.dto';
 import { ApproveTripRequestDto } from './dto/approve-trip-request.dto';
@@ -345,13 +346,23 @@ export class TripRequestsService {
         : ([] as TripRequestResultTrip[]),
     ]);
 
-    const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
+    // A request naming a restricted vehicle shows no vehicle (id included), like a trip.
+    const restrictedIds = new Set(
+      vehicles
+        .filter((v) => isRestrictedVehicle(v.vehicleNumber))
+        .map((v) => v.id),
+    );
+    const vehicleById = new Map(
+      vehicles.filter((v) => !restrictedIds.has(v.id)).map((v) => [v.id, v]),
+    );
     const customerById = new Map(customers.map((c) => [c.id, c]));
     const reviewerById = new Map(reviewers.map((u) => [u.id, u]));
     const tripById = new Map(trips.map((t) => [t.id, t]));
 
     return requests.map((r) => ({
       ...r,
+      vehicleId:
+        r.vehicleId && restrictedIds.has(r.vehicleId) ? null : r.vehicleId,
       vehicle: r.vehicleId ? (vehicleById.get(r.vehicleId) ?? null) : null,
       customer: r.customerId ? (customerById.get(r.customerId) ?? null) : null,
       reviewedBy: r.reviewedById

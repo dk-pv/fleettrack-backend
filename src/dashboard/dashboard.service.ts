@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, TripStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { effectiveVehicleStatus } from '../common/utils/vehicle-status';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 import {
   detectDelay,
   DEFAULT_DELAY_MARGIN_MINUTES,
@@ -204,18 +205,19 @@ export class DashboardService {
   }
 
   async getDashboardStats(clientId?: string) {
-    const vehicles = await this.prisma.vehicle.findMany({
-      where: clientId
-        ? {
-            clientId,
-          }
-        : undefined,
-      // Only the two columns this function reads: effectiveVehicleStatus takes
-      // { status, isOnline }, and totalVehicles is the row count. The counters and the
-      // response shape are unchanged — this just stops shipping ~20 unused columns
-      // per vehicle back from Postgres.
-      select: { status: true, isOnline: true },
-    });
+    const vehicles = (
+      await this.prisma.vehicle.findMany({
+        where: clientId
+          ? {
+              clientId,
+            }
+          : undefined,
+        // Only the columns this function reads: effectiveVehicleStatus takes
+        // { status, isOnline }, totalVehicles is the row count, and vehicleNumber drops
+        // restricted vehicles from every counter.
+        select: { status: true, isOnline: true, vehicleNumber: true },
+      })
+    ).filter((v) => !isRestrictedVehicle(v.vehicleNumber));
 
     let totalVehicles = vehicles.length;
     let activeVehicles = 0;
@@ -270,11 +272,14 @@ export class DashboardService {
     orderBy: {
       updatedAt: "desc",
     },
-
-    take: 5,
   });
 
-  const activeVehicles = vehicles.map((vehicle) => ({
+  // Top 5 AFTER dropping restricted vehicles (filtered in code, so `take` can't go in the
+  // query). The candidate set is only the online fleet, so fetching it whole is cheap.
+  const activeVehicles = vehicles
+    .filter((vehicle) => !isRestrictedVehicle(vehicle.vehicleNumber))
+    .slice(0, 5)
+    .map((vehicle) => ({
     id: vehicle.id,
     vehicleNumber: vehicle.vehicleNumber,
     driverName: vehicle.driverName,

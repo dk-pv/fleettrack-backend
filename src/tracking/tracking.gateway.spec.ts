@@ -89,4 +89,26 @@ describe('TrackingGateway — socket auth + scoping (Phase 10)', () => {
     expect(chain.to).not.toHaveBeenCalledWith('client:null');
     expect(emit).toHaveBeenCalled();
   });
+
+  it('emitVehicleUpdate never delivers a restricted vehicle, to anyone', () => {
+    const gw = new TrackingGateway({} as any);
+    const emit = jest.fn();
+    const chain: any = { to: jest.fn(), emit };
+    chain.to.mockReturnValue(chain);
+    (gw as any).server = { to: chain.to };
+
+    gw.emitVehicleUpdate({
+      id: 'r1',
+      vehicleNumber: 'KL 85 B 3285',
+      clientId: 'clientA',
+    });
+    gw.emitVehicleUpdate({
+      id: 'r2',
+      vehicleNumber: 'KL85B1418',
+      clientId: null,
+    });
+
+    expect(chain.to).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
 });

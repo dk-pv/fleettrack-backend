@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Client, Prisma, TripStatus } from '@prisma/client';
 import { CreateClientDto } from './dto/create-client.dto';
 import { UpdateClientDto } from './dto/update-client.dto';
+import { isRestrictedVehicle } from '../common/restricted-vehicles';
 
 /** Trip statuses that are actively running — blocks deleting the client, or removing a vehicle on one. */
 const ACTIVE_TRIP_STATUSES: TripStatus[] = [
@@ -82,10 +83,13 @@ export class ClientsService {
     const ids = [...new Set(vehicleIds)];
     if (ids.length === 0) return;
 
-    const vehicles = await tx.vehicle.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, clientId: true, vehicleNumber: true },
-    });
+    // A restricted vehicle counts as non-existent, so it can never be assigned.
+    const vehicles = (
+      await tx.vehicle.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, clientId: true, vehicleNumber: true },
+      })
+    ).filter((v) => !isRestrictedVehicle(v.vehicleNumber));
 
     if (vehicles.length !== ids.length) {
       throw new BadRequestException(
@@ -151,9 +155,21 @@ export class ClientsService {
 
     const updatedClient = await this.prisma.$transaction(async (tx) => {
       if (vehicleIds) {
+        // A restricted vehicle still assigned to this client is never in the list the admin
+        // sees, so it would always look "left out". Keep it out of the full-set logic so the
+        // API never writes to it (and never names it in the active-trip error below).
+        const restrictedIds = (
+          await tx.vehicle.findMany({
+            where: { clientId: id },
+            select: { id: true, vehicleNumber: true },
+          })
+        )
+          .filter((v) => isRestrictedVehicle(v.vehicleNumber))
+          .map((v) => v.id);
+
         const leaving: Prisma.VehicleWhereInput = {
           clientId: id,
-          id: { notIn: vehicleIds },
+          id: { notIn: [...vehicleIds, ...restrictedIds] },
         };
 
         // Unassigning hides the vehicle from the client, so one mid-delivery stays put
