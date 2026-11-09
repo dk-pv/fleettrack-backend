@@ -17,6 +17,7 @@ const RESTRICTED_VEHICLE_NUMBERS = new Set([
   'KL85B3285',
   'KL85B3218',
   'KL85B4876',
+  'KL84B4876',
 ]);
 
 export function isRestrictedVehicle(vehicleNumber?: string | null): boolean {
